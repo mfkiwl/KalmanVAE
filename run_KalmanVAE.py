@@ -3,32 +3,68 @@ import torch.nn as nn
 import time
 import wandb
 
-from Kalman_VAE import Kalman_VAE
+from Kalman_VAE import KalmanVAE
 from datetime import datetime
 
-def train():
-    pass
+from dataloaders.bouncing_data import BouncingBallDataLoader
+from torch.utils.data import DataLoader
 
-def test():
-    pass
+def train(train_loader, kvae, optimizer, args):
+
+    loss_epoch = 0.
+
+    for i, (sample,) in enumerate(train_loader, 1):
+
+        print(sample.size())
+
+        optimizer.zero_grad()
+
+        _ = kvae(sample)
+        loss = kvae.calculate_loss()
+
+        loss.backward()
+
+        optimizer.step()
+
+        # TODO: add calculation of MSE
+        # TODO: add gradient clipping
+
+        loss_epoch += loss
+    
+    return loss_epoch/len(train_loader)
+
+def test(valid_loader, kvae, optimizer, args):
+    return None
 
 def main(args):
 
     # load data
-    ##############################
-    # TODO: create ball simulation
-    train_loader = None
-    valid_loader = None
-    ##############################
+    train_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'train')
+    test_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'test')
+    train_dl = BouncingBallDataLoader(train_dir, images=True)
+    test_dl = BouncingBallDataLoader(test_dir, images=True)
+    train_loader = DataLoader(train_dl, batch_size=args.batch_size, shuffle=True)
+    valid_loader = DataLoader(test_dl, batch_size=args.batch_size, shuffle=True)
+
+    it = iter(train_loader)
+    first = next(it)
+    _, T, n_channels_in, dim, dim = first.size()
 
     # load model
-    kvae = Kalman_VAE(args.n_channels_in,
-                      args.dim_a, 
-                      args.dim_z, 
-                      args.K)
+    kvae = KalmanVAE(n_channels_in,
+                     dim,
+                     args.dim_a, 
+                     args.dim_z, 
+                     args.K, 
+                     T=T).cuda()
+    
+    # if already trained, load checkpoints
+    if args.kvae_model is not None:
+        kvae.load_state_dict(torch.load(args.kvae_model))
 
     # define optimizer
-    optimizer = torch.optim.Adam(kvae.parameters(), lr=args.lr)
+    params = [kvae.A, kvae.B, kvae.C] + list(kvae.encoder.parameters()) + list(kvae.decoder.parameters())
+    optimizer = torch.optim.Adam(params, lr=args.lr)
 
     # helper variables
     start = time.time()
@@ -51,7 +87,7 @@ def main(args):
     for epoch in range(args.num_epochs):
         
         # train 
-        loss_train = train(train_loader, optimizer, args)
+        loss_train = train(train_loader, kvae, optimizer, args)
         if args.use_wandb:
             run.log({"loss_train": loss_train})
         end = time.time()
@@ -61,7 +97,7 @@ def main(args):
         log_list.append(log + '\n')
         
         # validation
-        loss_test = test(valid_loader, optimizer, args)
+        loss_test = test(valid_loader, kvae, optimizer, args)
         if args.use_wandb:
             run.log({"loss_test": loss_test})
         log = 'epoch = {}, loss_test = {}'.format(epoch+1, loss_test)
@@ -86,9 +122,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Kalman VAE')
 
     # data parameters
-    parser.add_argument('--dataset', type=str, default='Ball_Simulation',
+    parser.add_argument('--dataset', type=str, default='Bouncing_Ball',
         help='dataset used')
-    parser.add_argument('--n_channels_in', type=int, default=3,
+    parser.add_argument('--n_channels_in', type=int, default=1,
         help='number of color channels in the data')
 
     # encoder parameters
@@ -102,7 +138,7 @@ if __name__ == '__main__':
     # training parameters
     parser.add_argument('--batch_size', type=int, default=64,
         help='batch size for training')
-    parser.add_argument('--lr', type=float, default=None,
+    parser.add_argument('--lr', type=float, default=0.001,
         help='learning rate for training')
     parser.add_argument('--num_epochs', type=int, default=100,
         help='number of epochs (default: 100)')
@@ -110,11 +146,13 @@ if __name__ == '__main__':
         help='use gradient clipping')
     
     # logistics
-    parser.add_argument('-kvae_model', type=str, default=None,
+    parser.add_argument('--datasets_root_dir', type=str, default="/data2/users/lr4617/data/",
+        help='path to the root directory of datasets')
+    parser.add_argument('--kvae_model', type=str, default=None,
         help='path to the kvae model dictionary')
     parser.add_argument('--output_folder', type=str, default='results',
         help='location to save kave model and results')
-    parser.add_argument('use_wandb', type=bool, default=False,
+    parser.add_argument('--use_wandb', type=bool, default=False,
         help='use weights and biases to track expriments')
     
     # get arguments

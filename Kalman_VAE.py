@@ -3,27 +3,33 @@ import torch.nn as nn
 from torch.distributions.multivariate_normal import MultivariateNormal
 
 from Kalman_Filter import Kalman_Filter
-from VAE import Guassian_Encoder, Guassian_Decoder
+from VAE import Gaussian_Encoder, Gaussian_Decoder
 
-class KalmanVAE(nn.module):
+class KalmanVAE(nn.Module):
     
     def __init__(self, 
                  n_channels_in,
                  image_size, 
                  dim_a, 
                  dim_z, 
-                 K):
+                 K, 
+                 T, 
+                 dim_u=0):
+        
+        super(KalmanVAE, self).__init__()
         
         ## initialize variables
         self.n_channels_in = n_channels_in
         self.dim_a = dim_a
         self.dim_z = dim_z
         self.K = K
+        self.T = T
 
         ## initialize Kalman Filter
         self.kalman_filter = Kalman_Filter(dim_z=self.dim_z, 
                                            dim_a=self.dim_a, 
-                                           K=self.K)
+                                           K=self.K, 
+                                           T=self.T)
 
         ## declare model variables
         # encoder mean and covariance
@@ -41,20 +47,21 @@ class KalmanVAE(nn.module):
         self.smoothed_covariances = None
 
         # dynamics matrices
-        self.A = None
-        self.B = None
-        self.C = None
+        self.A = self.kalman_filter.A
+        if dim_u > 0:
+            self.B = self.kalman_filter.B
+        self.C = self.kalman_filter.C
 
         # x sample (ground-truth) and a sample
         self.x = None
         self.a_sample = None
 
         # initialize encoder 
-        self.encoder = Guassian_Encoder(channels_in=n_channels_in, 
+        self.encoder = Gaussian_Encoder(channels_in=n_channels_in, 
                                         image_size=image_size, 
                                         a_dim=self.dim_a)
         
-        self.decoder = Guassian_Decoder(channels_in=n_channels_in, 
+        self.decoder = Gaussian_Decoder(channels_in=n_channels_in, 
                                         image_size=image_size, 
                                         a_dim=self.dim_a)
 
@@ -73,14 +80,16 @@ class KalmanVAE(nn.module):
         self.x_dist, self.x_mean, self.x_cov = self.decoder(self.a_sample)
 
         #### LGSSM - part
-        ## Smoothing Distribution: p_{gamma} (z|a) 
-        # use Kalman filter and then smoother to get smoothed posterior p_{gamma} (z|a)
+        # get smoothing Distribution: p_{gamma} (z|a) 
         params = self.kalman_filter.filter(self.a_sample)
         self.smoothed_means, self.smoothed_covariances, gamma = self.kalman_filter.smooth(self.a_sample, params)
         if len(gamma) == 2:
            self.A, self.B = gamma
         else:
            self.A, self.B, self.C = gamma
+        
+        # TODO: change this return to predicted sample
+        return gamma
 
     def calculate_loss(self):
 
@@ -122,6 +131,7 @@ class KalmanVAE(nn.module):
         p_zT_given_zt = MultivariateNormal(loc=z_transition, 
                                            covariance_matrix=self.kalman_filter.Q)
         log_p_zT_given_zt = p_zT_given_zt.log_prob(self.z_sample)
+        
 
         return log_p_x_given_a + log_q_a_given_x + log_p_z_given_a + log_p_a_given_z + log_p_zT_given_zt
 

@@ -1,10 +1,31 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
+class Dynamics_Network(nn.Module):
 
-# TODO: add LSTM-based dynamics network 
-class Dynamics_Network():
-    pass
+    def __init__(self,
+                 dim_a,
+                 dim_hidden,
+                 num_layers=2):
+        
+        super(Dynamics_Network, self).__init__()
+
+        self.dim_a = dim_a
+        self.dim_hidden = dim_hidden
+        self.num_layers = num_layers
+
+        self.dynamics_net = nn.LSTM(self.dim_a, 
+                                    self.dim_hidden, 
+                                    self.num_layers, 
+                                    batch_first=True)
+        
+    def forward(self, a):
+        weights, _ = self.dynamics_net(a)
+        weights = F.softmax(weights, dim=-1)
+
+        return weights
+    
 
 class Kalman_Filter(nn.Module):
 
@@ -20,11 +41,15 @@ class Kalman_Filter(nn.Module):
                  mu_init=0,
                  sigma_init=1,
                  K=3,
+                 T=1,
                  use_KVAE=True):
+
+        super(Kalman_Filter, self).__init__()
         
         self.dim_z = dim_z
         self.dim_a = dim_a
         self.dim_u = dim_u
+        self.K = K
 
         if isinstance(A_init, int):
             self.A = torch.eye(self.dim_z)
@@ -42,9 +67,11 @@ class Kalman_Filter(nn.Module):
             self.C = C_init
 
         if use_KVAE:
-            self.A = nn.Parameter(self.A)
-            self.B = nn.Parameter(self.B)
-            self.C = nn.Parameter(self.C)
+            self.dyn_net = Dynamics_Network(self.dim_a, self.K)
+            self.A = nn.Parameter(self.A.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
+            if self.dim_u > 0:
+                self.B = nn.Parameter(self.B.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
+            self.C = nn.Parameter(self.C.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
 
         self.R = R_init*torch.eye(self.dim_a)
         self.Q = Q_init*torch.eye(self.dim_z)
@@ -58,7 +85,6 @@ class Kalman_Filter(nn.Module):
         else:
             self.sigma = sigma_init
 
-        self.K = K
 
     def filter(self, a):
 
@@ -75,10 +101,10 @@ class Kalman_Filter(nn.Module):
         sigma = self.sigma.unsqueeze(0).repeat(bs, 1, 1) # (bs, dim_z, dim_z)
 
         # make A,B,C time-dependent
-        A = self.A.unsqueeze(0).unsqueeze(1).repeat(bs, sequence_len, 1,1) # (bs, seq_len, dim_z, dim_z)
+        A = self.A.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_z, dim_z)
         if self.dim_u > 0:
-            B = self.B.unsqueeze(0).unsqueeze(1).repeat(bs, sequence_len, 1,1) # (bs, seq_len, dim_z, dim_u)
-        C = self.C.unsqueeze(0).unsqueeze(1).repeat(bs, sequence_len, 1,1) # (bs, seq_len, dim_a, dim_z)
+            B = self.B.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_z, dim_u)
+        C = self.C.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_a, dim_z)
 
         # collect means and covariances for smoothing i.e mu_{t|t} --> E(z_t|y_1:t)
         means = [] # [(bs, dim_z). ..., (bs, dim_z)]
@@ -89,8 +115,17 @@ class Kalman_Filter(nn.Module):
         next_means = [] # [(bs, dim_z). ..., (bs, dim_z)]
         next_covariances = [] # [(bs, dim_z, dim_z). ..., (bs, dim_z, dim_z)]
 
+        # get alpha
+        alpha = self.dyn_net(a) # (bs, L, K)
+
+        # get mixture of As and Cs
+        A = torch.einsum('blk,blkij->blij', alpha, A)
+        C = torch.einsum('blk,blkij->blij', alpha, C)
+
         # iterate through the length of the sequence
         for t_step in range(sequence_len):
+            
+            # compute mixture of C matrices based on K
 
             # get predicted observation
             a_pred = torch.matmul(C[:, t_step, :, :], mu.unsqueeze(2)).squeeze(2)

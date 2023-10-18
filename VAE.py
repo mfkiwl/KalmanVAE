@@ -17,7 +17,7 @@ def compute_convolution_output_size(image_size, n_channels, kernel_size):
     return out_sizes
 
 
-class Guassian_Encoder(nn.Module):
+class Gaussian_Encoder(nn.Module):
     def __init__(self, 
                  channels_in,
                  image_size,
@@ -25,7 +25,7 @@ class Guassian_Encoder(nn.Module):
                  n_channels=[16, 32, 64], 
                  kernel_size=3):
         
-        super(Guassian_Encoder).__init__()
+        super(Gaussian_Encoder).__init__()
 
         modules = []
         for i, n_channel in enumerate(n_channels):
@@ -60,7 +60,7 @@ class Guassian_Encoder(nn.Module):
         return a_dist, mean, std
     
 
-class Guassian_Decoder(nn.Module):
+class Gaussian_Decoder(nn.Module):
     def __init__(self, 
                  channels_in,
                  image_size,
@@ -68,7 +68,7 @@ class Guassian_Decoder(nn.Module):
                  n_channels=[16, 32, 64], 
                  kernel_size=3):
         
-        super(Guassian_Decoder).__init__()
+        super(Gaussian_Decoder).__init__()
 
         self.conv_out_size = compute_convolution_output_size(image_size, n_channels, kernel_size)
 

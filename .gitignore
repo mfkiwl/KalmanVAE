@@ -1,5 +1,8 @@
 results/
 __pycache__/
+datasets/
+scripts/
+dataloaders/
 
 *.pyc
 
