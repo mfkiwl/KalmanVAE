@@ -62,7 +62,6 @@ class Gaussian_Encoder(nn.Module):
 
         return a_dist, mean, std
     
-
 class Gaussian_Decoder(nn.Module):
     def __init__(self, 
                  channels_in,

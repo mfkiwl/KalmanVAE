@@ -84,11 +84,14 @@ class KalmanVAE(nn.Module):
         #### LGSSM - part
         # get smoothing Distribution: p_{gamma} (z|a) 
         params = self.kalman_filter.filter(self.a_sample, device=self.A.get_device())
-        self.smoothed_means, self.smoothed_covariances = self.kalman_filter.smooth(self.a_sample, params)
-        
-        return x_hat
 
-    def calculate_loss(self):
+        _, _, _, _, _, _, A, C = params
+
+        self.smoothed_means, self.smoothed_covariances = self.kalman_filter.smooth(self.a_sample, params)
+
+        return x_hat, A, C
+
+    def calculate_loss(self, A, C):
 
         #### VAE - part
         # a_mean, a_cov and a_sample will be used to calculate
@@ -108,10 +111,9 @@ class KalmanVAE(nn.Module):
         #### LGSSM - part
         # first we create p_{gamma} (z|a) from the smoothed
         # means and covariances as a Multivariate Normal
-
-        print(type(self.smoothed_means))
-        p_z_given_a = MultivariateNormal(loc=torch.FloatTensor(self.smoothed_means), 
-                                         covariance_matrix=torch.FloatTensor(self.smoothed_covariances))
+        
+        p_z_given_a = MultivariateNormal(loc=torch.cat(self.smoothed_means), 
+                                         scale_tril=torch.linalg.cholesky(torch.cat(self.smoothed_covariances)))
         
         # sample z from smoothed posterior p_{gamma} (z|a) --> (bs, seq_len, dim_z)
         # and evaluate p_z_given_a using z_sample
@@ -120,16 +122,18 @@ class KalmanVAE(nn.Module):
 
         # create p_{gamma} (a|z) = C (bs, seq_len, dim_a, dim_z) * z (bs, seq_len, dim_z)
         # and evaluate it with sample from a_dist
-        a_transition = torch.matmul(self.C, z_sample.unsqueeze(-1)).squeeze(-1)
+        a_transition = torch.matmul(C, z_sample.view(self.x.size(0), self.x.size(1), -1).unsqueeze(-1)).squeeze(-1)
         p_a_given_z = MultivariateNormal(loc=a_transition, 
-                                         covariance_matrix=self.kalman_filter.R)
+                                         scale_tril=torch.linalg.cholesky(self.kalman_filter.R))
         log_p_a_given_z = p_a_given_z.log_prob(self.a_sample)
 
         # create transitional distribution --> p(z_T|z_{T-1})p(z_{T-1}|z_{T-2}) ... p(z_2|z_1)p(z_1)
-        z_transition = torch.matmul(self.A, z_sample.unsqueeze(-1)).squeeze(-1)
+        z_transition = torch.matmul(A, z_sample.view(self.x.size(0), self.x.size(1), -1).unsqueeze(-1)).squeeze(-1)
+        print('DEVICE: ', z_transition.get_device())
         p_zT_given_zt = MultivariateNormal(loc=z_transition, 
-                                           covariance_matrix=self.kalman_filter.Q)
-        log_p_zT_given_zt = p_zT_given_zt.log_prob(self.z_sample)
+                                           scale_tril=torch.linalg.cholesky(self.kalman_filter.Q))
+        print('DEVICE: ', z_sample.get_device())
+        log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample.view(self.x.size(0), self.x.size(1), -1))
         
 
         return log_p_x_given_a + log_q_a_given_x + log_p_z_given_a + log_p_a_given_z + log_p_zT_given_zt

@@ -19,8 +19,8 @@ def train(train_loader, kvae, optimizer, args):
         
         sample = sample.cuda().float()
 
-        _ = kvae(sample)
-        loss = kvae.calculate_loss()
+        x_hat, A, C = kvae(sample)
+        loss = kvae.calculate_loss(A, C)
 
         loss.backward()
 
@@ -90,6 +90,8 @@ def main(args):
     # training + validation loop (+ save checkpoints)
     for epoch in range(args.num_epochs):
         
+        print('EPOCH: ',  epoch)
+
         # train 
         loss_train = train(train_loader, kvae, optimizer, args)
         if args.use_wandb:
@@ -109,8 +111,9 @@ def main(args):
         log_list.append(log + '\n')
 
         # save checkpoints 
-        with open(save_filename + '/kvae' + str(epoch+1) + '.pt', 'wb') as f:
-            torch.save(kvae.state_dict(), f)
+        if epoch % 10 == 0:
+            with open(save_filename + '/kvae' + str(epoch+1) + '.pt', 'wb') as f:
+                torch.save(kvae.state_dict(), f)
         
         # save training log
         with open(save_filename + '/training.cklog', "a+") as log_file:
@@ -132,9 +135,9 @@ if __name__ == '__main__':
         help='number of color channels in the data')
 
     # encoder parameters
-    parser.add_argument('--dim_a', type=int, default=4,
+    parser.add_argument('--dim_a', type=int, default=2,
         help='dimensionality of encoded vector a')
-    parser.add_argument('--dim_z', type=int, default=2,
+    parser.add_argument('--dim_z', type=int, default=4,
         help='dimensionality of encoded vector z')
     parser.add_argument('--dim_u', type=int, default=0,
         help='dimensionality of encoded vector u')

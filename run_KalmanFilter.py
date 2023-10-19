@@ -11,10 +11,13 @@ sequence_len = 8
 batch_size = 16
 
 a = torch.randn(batch_size, sequence_len, dim_z)
-kalman_filter = Kalman_Filter(dim_z, dim_a, dim_u=0, use_KVAE=False)
+kalman_filter = Kalman_Filter(dim_z, 
+                              dim_a, 
+                              dim_u=0, 
+                              use_KVAE=False)
 
-params= kalman_filter.filter(a)
-means, covariances, gamma = kalman_filter.smooth(a, params)
+params = kalman_filter.filter(a)
+means, covariances = kalman_filter.smooth(a, params)
 
 # Test Kalman Filter with synthetic data
 # create ground truth data
@@ -41,7 +44,7 @@ observations_seq = torch.tensor(observations_seq).unsqueeze(0)
 # initialize Kalman filter
 dim_z = 4
 dim_a = observations_seq.size(2)
-delta = 0.05
+delta = 0.5
 A_init = torch.FloatTensor([[1, 0, delta, 0], [0, 1, 0, delta], [0, 0, 1, 0], [0, 0, 0, 1]])
 C_init = torch.FloatTensor([[1, 0, 0, 0], [0, 1, 0, 0]])
 R_init = 0.25
@@ -64,13 +67,17 @@ mu, sigma, filtered_means, filtered_covariances, next_means, next_covariances, g
 filtered_X = []
 filtered_Y = []
 for _, loc in enumerate(filtered_means):
-    print(loc[0, 0:2])
     filtered_X.append(loc[0, 0].numpy())
     filtered_Y.append(loc[0, 1].numpy())
 
 # smooth observations
 params = [mu, sigma, filtered_means, filtered_covariances, next_means, next_covariances, gamma]
-smoothed_means, smoothed_covariances, gamma = kalman_filter.smooth(observations_seq, params)
+smoothed_means, smoothed_covariances = kalman_filter.smooth(observations_seq, params)
+
+# check for positive definite covariances in filtering and smoothing
+print(torch.linalg.cholesky(torch.cat(filtered_covariances)) is not None)
+print(torch.linalg.cholesky(torch.cat(smoothed_covariances)) is not None)
+
 smoothed_X = []
 smoothed_Y = []
 for _, loc in enumerate(smoothed_means):

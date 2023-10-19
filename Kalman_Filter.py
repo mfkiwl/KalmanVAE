@@ -36,8 +36,8 @@ class Kalman_Filter(nn.Module):
                  A_init=1,
                  B_init=1,
                  C_init=1,
-                 R_init=0.1,
-                 Q_init=0.1,
+                 R_init=0.01,
+                 Q_init=0.01,
                  mu_init=0,
                  sigma_init=1,
                  K=3,
@@ -50,6 +50,7 @@ class Kalman_Filter(nn.Module):
         self.dim_a = dim_a
         self.dim_u = dim_u
         self.K = K
+        self.use_KVAE = use_KVAE
 
         if isinstance(A_init, int):
             self.A = torch.eye(self.dim_z)
@@ -66,7 +67,7 @@ class Kalman_Filter(nn.Module):
         else:
             self.C = C_init
 
-        if use_KVAE:
+        if self.use_KVAE:
             self.dyn_net = Dynamics_Network(self.dim_a, self.K).cuda()
             self.A = nn.Parameter(self.A.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
             if self.dim_u > 0:
@@ -103,11 +104,17 @@ class Kalman_Filter(nn.Module):
             mu = mu.to(device)
             sigma = sigma.to(device)
 
-        # make A,B,C time-dependent
-        A = self.A.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_z, dim_z)
-        if self.dim_u > 0:
-            B = self.B.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_z, dim_u)
-        C = self.C.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_a, dim_z)
+        # adjust A,B,C depending on whether we are using KVAE or not
+        if self.use_KVAE:
+            A = self.A.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_z, dim_z)
+            if self.dim_u > 0:
+                B = self.B.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_z, dim_u)
+            C = self.C.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_a, dim_z)
+        else:
+            A = self.A.unsqueeze(0).unsqueeze(1).repeat(bs, sequence_len, 1, 1) # (bs, seq_len, dim_z, dim_z)
+            if self.dim_u > 0:
+                B = self.B.unsqueeze(0).unsqueeze(1).repeat(bs, sequence_len, 1, 1) # (bs, seq_len, dim_z, dim_u)
+            C = self.C.unsqueeze(0).unsqueeze(1).repeat(bs, sequence_len, 1, 1) # (bs, seq_len, dim_a, dim_z)
 
         # collect means and covariances for smoothing i.e mu_{t|t} --> E(z_t|y_1:t)
         means = [] # [(bs, dim_z). ..., (bs, dim_z)]
@@ -118,12 +125,14 @@ class Kalman_Filter(nn.Module):
         next_means = [] # [(bs, dim_z). ..., (bs, dim_z)]
         next_covariances = [] # [(bs, dim_z, dim_z). ..., (bs, dim_z, dim_z)]
 
-        # get alpha
-        alpha = self.dyn_net(a) # (bs, L, K)
+        # compute mixture of A and C in case we are use Kalman filter in KVAE
+        if self.use_KVAE:
+            # get alpha
+            alpha = self.dyn_net(a) # (bs, L, K)
 
-        # get mixture of As and Cs
-        A = torch.einsum('blk,bklij->blij', alpha, A)
-        C = torch.einsum('blk,bklij->blij', alpha, C)
+            # get mixture of As and Cs
+            A = torch.einsum('blk,bklij->blij', alpha, A)
+            C = torch.einsum('blk,bklij->blij', alpha, C)
 
         # iterate through the length of the sequence
         for t_step in range(sequence_len):
@@ -173,7 +182,7 @@ class Kalman_Filter(nn.Module):
             next_means.append(mu_pred)
             next_covariances.append(sigma_pred)
         
-        return mu, sigma, means, covariances, next_means, next_covariances, A
+        return mu, sigma, means, covariances, next_means, next_covariances, A, C
 
     def smooth(self, a, params):
 
@@ -188,7 +197,7 @@ class Kalman_Filter(nn.Module):
         bs, sequence_len = a.size(0), a.size(1)
 
         # get filtered mean and covariances for initialization of Kalman smoother
-        _, _, filtered_means, filtered_covariances, next_means, next_covariances, A = params
+        _, _, filtered_means, filtered_covariances, next_means, next_covariances, A, _ = params
 
         # collect smoothed means and covariance
         means = [filtered_means[-1]]
@@ -203,7 +212,7 @@ class Kalman_Filter(nn.Module):
 
             # get smoothed mean and covariance
             mu_t_T = filtered_means[t_step_reversed] + torch.matmul(J, (means[0] - next_means[t_step_reversed]).unsqueeze(2)).squeeze(2)
-            sigma_t_T = filtered_covariances[t_step_reversed] + torch.matmul(J, covariances[0] - next_covariances[t_step_reversed])
+            sigma_t_T = filtered_covariances[t_step_reversed] + torch.matmul(torch.matmul(J, covariances[0] - next_covariances[t_step_reversed]), torch.transpose(J, 1,2))
             
             means.insert(0, mu_t_T)
             covariances.insert(0, sigma_t_T)
