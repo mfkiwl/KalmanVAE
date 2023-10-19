@@ -13,11 +13,11 @@ def train(train_loader, kvae, optimizer, args):
 
     loss_epoch = 0.
 
-    for i, (sample,) in enumerate(train_loader, 1):
-
-        print(sample.size())
+    for _, sample in enumerate(train_loader, 1):
 
         optimizer.zero_grad()
+        
+        sample = sample.cuda().float()
 
         _ = kvae(sample)
         loss = kvae.calculate_loss()
@@ -63,7 +63,10 @@ def main(args):
         kvae.load_state_dict(torch.load(args.kvae_model))
 
     # define optimizer
-    params = [kvae.A, kvae.B, kvae.C] + list(kvae.encoder.parameters()) + list(kvae.decoder.parameters())
+    if args.dim_u == 0:
+        params = [kvae.A, kvae.C] + list(kvae.encoder.parameters()) + list(kvae.decoder.parameters())
+    else:
+        params = [kvae.A, kvae.B, kvae.C] + list(kvae.encoder.parameters()) + list(kvae.decoder.parameters())
     optimizer = torch.optim.Adam(params, lr=args.lr)
 
     # helper variables
@@ -76,12 +79,13 @@ def main(args):
     save_filename = args.output_folder + '/{}'.format(args.dataset) + '/{}'.format(run_name) 
     if not os.path.isdir(save_filename):
         os.makedirs(save_filename)
-    run = wandb.init(project="autoregressive-trasformer", 
-                     config={"dataset" : args.dataset,
-                             "batch size" : args.batch_size,
-                             "iterations" : args.num_epochs,
-                             "learning rate" : args.lr},
-                     name=run_name)
+    if args.use_wandb:
+        run = wandb.init(project="autoregressive-trasformer", 
+                        config={"dataset" : args.dataset,
+                                "batch size" : args.batch_size,
+                                "iterations" : args.num_epochs,
+                                "learning rate" : args.lr},
+                        name=run_name)
 
     # training + validation loop (+ save checkpoints)
     for epoch in range(args.num_epochs):
@@ -132,6 +136,8 @@ if __name__ == '__main__':
         help='dimensionality of encoded vector a')
     parser.add_argument('--dim_z', type=int, default=2,
         help='dimensionality of encoded vector z')
+    parser.add_argument('--dim_u', type=int, default=0,
+        help='dimensionality of encoded vector u')
     parser.add_argument('--K', type=int, default=3,
         help='number of LGSSMs to be mixed')
 

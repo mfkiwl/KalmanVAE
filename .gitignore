@@ -3,6 +3,7 @@ __pycache__/
 datasets/
 scripts/
 dataloaders/
+wandb/
 
 *.pyc
 

@@ -68,28 +68,25 @@ class KalmanVAE(nn.Module):
     def forward(self, x):
 
         self.x = x
+        batch_size = x.size(0)
+        seq_len = x.size(1)
         
         #### VAE - part
         # encode samples i.e get q_{phi} (a|x)
-        self.a_dist, self.a_mean, self.a_cov = self.encoder(x)
+        self.a_dist, self.a_mean, self.a_cov = self.encoder(x.view(-1,*self.x.shape[2:]))
 
         # sample from q_{phi} (a|x)
-        self.a_sample = self.a_dist.sample()
+        self.a_sample = self.a_dist.sample().view(batch_size, seq_len, self.dim_a)
 
         # get reconstruction i.e. get p_{theta} (x|a)
-        self.x_dist, self.x_mean, self.x_cov = self.decoder(self.a_sample)
+        x_hat, self.x_dist, self.x_mean, self.x_cov = self.decoder(self.a_sample)
 
         #### LGSSM - part
         # get smoothing Distribution: p_{gamma} (z|a) 
-        params = self.kalman_filter.filter(self.a_sample)
-        self.smoothed_means, self.smoothed_covariances, gamma = self.kalman_filter.smooth(self.a_sample, params)
-        if len(gamma) == 2:
-           self.A, self.B = gamma
-        else:
-           self.A, self.B, self.C = gamma
+        params = self.kalman_filter.filter(self.a_sample, device=self.A.get_device())
+        self.smoothed_means, self.smoothed_covariances = self.kalman_filter.smooth(self.a_sample, params)
         
-        # TODO: change this return to predicted sample
-        return gamma
+        return x_hat
 
     def calculate_loss(self):
 
@@ -98,21 +95,23 @@ class KalmanVAE(nn.Module):
         # the log likelihood of q_{phi} (a|x) by essentially 
         # evaluating the Normal distribution with a=a_sample,
         # mean=a_mean (from encoder) and cov=a_cov (from encoder). 
-        log_q_a_given_x = self.a_dist.log_prob(self.a_sample)
+        log_q_a_given_x = self.a_dist.log_prob(self.a_sample.view(-1, self.dim_a))
 
         # x_mean and x_cov are used for calculating the 
         # log likelihood p_{theta} (x|a) where x=ground-truth
         # so the estimantion of log(p_{theta}(x|a)) is equal to 
         # the evaluation of a Normal distribution with x=ground-truth, 
         # mean=x_mean (from decoder) and covariance=x_cov (from decoder).
-        log_p_x_given_a = self.x_dist.log_prob(self.x)
+        log_p_x_given_a = self.x_dist.log_prob(self.x.view(-1, *self.x.shape[2:]))
 
 
         #### LGSSM - part
         # first we create p_{gamma} (z|a) from the smoothed
         # means and covariances as a Multivariate Normal
-        p_z_given_a = MultivariateNormal(loc=self.smoothed_means, 
-                                         covariance_matrix=self.smoothed_covariances)
+
+        print(type(self.smoothed_means))
+        p_z_given_a = MultivariateNormal(loc=torch.FloatTensor(self.smoothed_means), 
+                                         covariance_matrix=torch.FloatTensor(self.smoothed_covariances))
         
         # sample z from smoothed posterior p_{gamma} (z|a) --> (bs, seq_len, dim_z)
         # and evaluate p_z_given_a using z_sample

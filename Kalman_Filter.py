@@ -67,7 +67,7 @@ class Kalman_Filter(nn.Module):
             self.C = C_init
 
         if use_KVAE:
-            self.dyn_net = Dynamics_Network(self.dim_a, self.K)
+            self.dyn_net = Dynamics_Network(self.dim_a, self.K).cuda()
             self.A = nn.Parameter(self.A.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
             if self.dim_u > 0:
                 self.B = nn.Parameter(self.B.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
@@ -85,8 +85,7 @@ class Kalman_Filter(nn.Module):
         else:
             self.sigma = sigma_init
 
-
-    def filter(self, a):
+    def filter(self, a, device=None):
 
         '''
         This method carries out Kalman filtering based 
@@ -99,6 +98,10 @@ class Kalman_Filter(nn.Module):
         # define mean and covariance for initial state z_0 = N(0, I)
         mu = self.mu.unsqueeze(0).repeat(bs, 1) # (bs, dim_z)
         sigma = self.sigma.unsqueeze(0).repeat(bs, 1, 1) # (bs, dim_z, dim_z)
+
+        if device is not None:
+            mu = mu.to(device)
+            sigma = sigma.to(device)
 
         # make A,B,C time-dependent
         A = self.A.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_z, dim_z)
@@ -119,8 +122,8 @@ class Kalman_Filter(nn.Module):
         alpha = self.dyn_net(a) # (bs, L, K)
 
         # get mixture of As and Cs
-        A = torch.einsum('blk,blkij->blij', alpha, A)
-        C = torch.einsum('blk,blkij->blij', alpha, C)
+        A = torch.einsum('blk,bklij->blij', alpha, A)
+        C = torch.einsum('blk,bklij->blij', alpha, C)
 
         # iterate through the length of the sequence
         for t_step in range(sequence_len):
@@ -142,7 +145,9 @@ class Kalman_Filter(nn.Module):
                 sigma_pred = sigma
 
             # get S matrix
-            S = torch.matmul(torch.matmul(C[:, t_step, :, :], sigma_pred), torch.transpose(C[:, t_step, :, :],1,2)) + self.R
+            if device is not None:
+                self.R = self.R.to(device)
+            S = torch.matmul(torch.matmul(C[:, t_step, :, :], sigma_pred), torch.transpose(C[:, t_step, :, :],1,2)) + self.R.to(device)
             S_inv = torch.linalg.inv(S)
 
             # get Kalman gain
@@ -151,11 +156,14 @@ class Kalman_Filter(nn.Module):
             # update mean and covariance
             mu = mu_pred + torch.matmul(K, r.unsqueeze(2)).squeeze(2)
             KC = torch.matmul(K, C[:, t_step, :, :])
-            sigma = torch.matmul((torch.eye(self.dim_z).repeat(bs, 1, 1) - KC), sigma_pred)
+            I = torch.eye(self.dim_z).repeat(bs, 1, 1)
+            if device is not None:
+                I = I.to(device)
+            sigma = torch.matmul((I - KC), sigma_pred)
 
             # get predicted mean and covariances
             mu_pred = torch.matmul(A[:, t_step, :, :], mu.unsqueeze(2)).squeeze(2)
-            sigma_pred = torch.matmul(torch.matmul(A[:, t_step, :, :], sigma), torch.transpose(A[:, t_step, :, :],1,2)) + self.Q
+            sigma_pred = torch.matmul(torch.matmul(A[:, t_step, :, :], sigma), torch.transpose(A[:, t_step, :, :],1,2)) + self.Q.to(device)
         
             # collect mean and covariance
             means.append(mu)
@@ -164,13 +172,8 @@ class Kalman_Filter(nn.Module):
             # collect predicted mean and predicted covariance
             next_means.append(mu_pred)
             next_covariances.append(sigma_pred)
-
-        if self.dim_u > 0:
-            gamma = [A, B, C]
-        else:
-            gamma = [A, C]
         
-        return mu, sigma, means, covariances, next_means, next_covariances, gamma
+        return mu, sigma, means, covariances, next_means, next_covariances, A
 
     def smooth(self, a, params):
 
@@ -185,12 +188,7 @@ class Kalman_Filter(nn.Module):
         bs, sequence_len = a.size(0), a.size(1)
 
         # get filtered mean and covariances for initialization of Kalman smoother
-        _, _, filtered_means, filtered_covariances, next_means, next_covariances, gamma = params
-
-        if len(gamma) == 2:
-            A, C = gamma
-        else:
-            A, B, C = gamma
+        _, _, filtered_means, filtered_covariances, next_means, next_covariances, A = params
 
         # collect smoothed means and covariance
         means = [filtered_means[-1]]
@@ -210,10 +208,5 @@ class Kalman_Filter(nn.Module):
             means.insert(0, mu_t_T)
             covariances.insert(0, sigma_t_T)
         
-        if self.dim_u > 0:
-            gamma = [A, B, C]
-        else:
-            gamma = [A, C]
-        
-        return means, covariances, gamma
+        return means, covariances
             
