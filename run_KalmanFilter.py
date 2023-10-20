@@ -1,7 +1,12 @@
 import torch
 import matplotlib.pyplot as plt 
+import torch.distributions as Distributions
 
 from Kalman_Filter import Kalman_Filter
+
+# test torch.distribution sizes
+dist = Distributions.Normal(loc=torch.randn(64,50,1,16,16), scale=torch.ones(64,50,1,16,16))
+print(dist.log_prob(torch.randn(16)).size())
 
 # Test Kalman Filter with random data
 dim_z = 2

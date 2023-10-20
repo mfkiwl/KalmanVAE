@@ -58,9 +58,7 @@ class Gaussian_Encoder(nn.Module):
         mean = self.to_mean(x)
         std = F.softplus(self.to_std(x))
 
-        a_dist = Distributions.Normal(loc=mean, scale=std)
-
-        return a_dist, mean, std
+        return mean, std
     
 class Gaussian_Decoder(nn.Module):
     def __init__(self, 
@@ -122,11 +120,9 @@ class Gaussian_Decoder(nn.Module):
         mean = self.to_mean(x)
         std = F.softplus(self.to_std(x))
 
-        x_dist = Distributions.Normal(loc=mean, scale=std)
-
         x_hat = mean + std*torch.randn_like(std)
 
-        return x_hat, x_dist, mean, std
+        return x_hat, mean, std
         
         
             

@@ -156,7 +156,8 @@ class Kalman_Filter(nn.Module):
             # get S matrix
             if device is not None:
                 self.R = self.R.to(device)
-            S = torch.matmul(torch.matmul(C[:, t_step, :, :], sigma_pred), torch.transpose(C[:, t_step, :, :],1,2)) + self.R.to(device)
+                self.Q = self.Q.to(device)
+            S = torch.matmul(torch.matmul(C[:, t_step, :, :], sigma_pred), torch.transpose(C[:, t_step, :, :],1,2)) + self.R
             S_inv = torch.linalg.inv(S)
 
             # get Kalman gain
@@ -172,7 +173,7 @@ class Kalman_Filter(nn.Module):
 
             # get predicted mean and covariances
             mu_pred = torch.matmul(A[:, t_step, :, :], mu.unsqueeze(2)).squeeze(2)
-            sigma_pred = torch.matmul(torch.matmul(A[:, t_step, :, :], sigma), torch.transpose(A[:, t_step, :, :],1,2)) + self.Q.to(device)
+            sigma_pred = torch.matmul(torch.matmul(A[:, t_step, :, :], sigma), torch.transpose(A[:, t_step, :, :],1,2)) + self.Q
         
             # collect mean and covariance
             means.append(mu)
