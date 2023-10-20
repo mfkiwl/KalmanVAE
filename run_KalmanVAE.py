@@ -87,11 +87,20 @@ def main(args):
                                 "learning rate" : args.lr},
                         name=run_name)
 
+    # define number of epochs when NOT to train Dynamic Parameter Network
+    n_epoch_initial = 20
+
     # training + validation loop (+ save checkpoints)
     for epoch in range(args.num_epochs):
         
-        print('EPOCH: ',  epoch)
-
+        # delay training of Dynamics Parameter Network to epoch = n_epoch_initial
+        if epoch < n_epoch_initial:
+            for param in kvae.dynamics_net.parameters():
+                param.requires_grad = False
+        elif epoch == n_epoch_initial:
+            for param in kvae.dynamics_net.parameters():
+                param.requires_grad = True
+        
         # train 
         loss_train = train(train_loader, kvae, optimizer, args)
         if args.use_wandb:
@@ -99,14 +108,6 @@ def main(args):
         end = time.time()
         log = 'epoch = {}, loss_train = {}, time = {}'.format(epoch+1, loss_train, end-start)
         start = end
-        print(log)
-        log_list.append(log + '\n')
-        
-        # validation
-        loss_test = test(valid_loader, kvae, optimizer, args)
-        if args.use_wandb:
-            run.log({"loss_test": loss_test})
-        log = 'epoch = {}, loss_test = {}'.format(epoch+1, loss_test)
         print(log)
         log_list.append(log + '\n')
 

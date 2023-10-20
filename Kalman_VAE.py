@@ -14,6 +14,7 @@ class KalmanVAE(nn.Module):
                  dim_z, 
                  K, 
                  T, 
+                 recon_scale=0.3,
                  dim_u=0):
         
         super(KalmanVAE, self).__init__()
@@ -24,6 +25,7 @@ class KalmanVAE(nn.Module):
         self.dim_z = dim_z
         self.K = K
         self.T = T
+        self.recon_scale = recon_scale
 
         ## initialize Kalman Filter
         self.kalman_filter = Kalman_Filter(dim_z=self.dim_z, 
@@ -52,6 +54,9 @@ class KalmanVAE(nn.Module):
             self.B = self.kalman_filter.B
         self.C = self.kalman_filter.C
 
+        # dynamics parameter 
+        self.dynamics_net = self.kalman_filter.dyn_net
+
         # x sample (ground-truth) and a sample
         self.x = None
         self.a_sample = None
@@ -66,7 +71,8 @@ class KalmanVAE(nn.Module):
                                         a_dim=self.dim_a)
 
     def forward(self, x):
-
+        
+        # get batch size and sequence length
         self.x = x
         batch_size = x.size(0)
         seq_len = x.size(1)
@@ -79,7 +85,7 @@ class KalmanVAE(nn.Module):
         self.a_sample = (self.a_mean + self.a_std*torch.normal(mean=torch.zeros_like(self.a_mean))).view(batch_size, seq_len, self.dim_a)
 
         # get reconstruction i.e. get p_{theta} (x|a)
-        x_hat, self.x_mean, self.x_cov = self.decoder(self.a_sample)
+        x_hat, self.x_mean, self.x_std = self.decoder(self.a_sample)
 
         #### LGSSM - part
         # get smoothing Distribution: p_{gamma} (z|a) 
@@ -91,25 +97,25 @@ class KalmanVAE(nn.Module):
 
     def calculate_loss(self, A, C):
 
+        num_el = self.x.size(0)*self.x.size(1)
+
         #### VAE - part
         # a_mean, a_cov and a_sample will be used to calculate
         # the log likelihood of q_{phi} (a|x) by essentially 
         # evaluating the Normal distribution with a=a_sample,
         # mean=a_mean (from encoder) and cov=a_cov (from encoder).
-        print(self.a_std.size())
-        print((torch.eye(self.dim_a).unsqueeze(0).repeat(self.x.size(0)*self.x.size(1), 1, 1)).size())
         self.a_dist = MultivariateNormal(loc=self.a_mean,   
-                                         covariance_matrix=self.a_std*(torch.eye(self.dim_a).unsqueeze(0).repeat(self.x.size(0)*self.x.size(1), 1, 1)).to(self.x.get_device()))
-        log_q_a_given_x = self.a_dist.log_prob(self.a_sample.view(-1, self.dim_a))
+                                         covariance_matrix=torch.diag_embed(self.a_std))
+        log_q_a_given_x = self.a_dist.log_prob(self.a_sample.view(-1, self.dim_a)).sum().div(num_el)
 
         # x_mean and x_cov are used for calculating the 
         # log likelihood p_{theta} (x|a) where x=ground-truth
         # so the estimantion of log(p_{theta}(x|a)) is equal to 
         # the evaluation of a Normal distribution with x=ground-truth, 
         # mean=x_mean (from decoder) and covariance=x_cov (from decoder).
-        self.x_dist = MultivariateNormal(loc=self.x_mean, 
-                                         covariance_matrix=0.01*torch.eye(self.x.size(-1)).to(self.x.get_device()))
-        log_p_x_given_a = self.x_dist.log_prob(self.x.view(-1, *self.x.shape[2:]))
+        self.x_dist = MultivariateNormal(loc=self.x_mean.view(self.x.size(0)*self.x.size(1), -1), 
+                                         covariance_matrix=torch.diag_embed(self.x_std.view(self.x_std.size(0), -1)).to(self.x.get_device()))
+        log_p_x_given_a = self.x_dist.log_prob(self.x.view(self.x.size(0)*self.x.size(1), -1)).sum().div(num_el)
 
 
         #### LGSSM - part
@@ -122,27 +128,26 @@ class KalmanVAE(nn.Module):
         # sample z from smoothed posterior p_{gamma} (z|a) --> (bs, seq_len, dim_z)
         # and evaluate p_z_given_a using z_sample
         z_sample = p_z_given_a.sample() 
-        log_p_z_given_a = p_z_given_a.log_prob(z_sample)
+        log_p_z_given_a = p_z_given_a.log_prob(z_sample).sum().div(num_el)
 
         # create p_{gamma} (a|z) = C (bs, seq_len, dim_a, dim_z) * z (bs, seq_len, dim_z)
         # and evaluate it with sample from a_dist
         a_transition = torch.matmul(C, z_sample.view(self.x.size(0), self.x.size(1), -1).unsqueeze(-1)).squeeze(-1)
         p_a_given_z = MultivariateNormal(loc=a_transition, 
                                          scale_tril=torch.linalg.cholesky(self.kalman_filter.R))
-        print(p_a_given_z.sample().size())
-        log_p_a_given_z = p_a_given_z.log_prob(self.a_sample)
+        log_p_a_given_z = p_a_given_z.log_prob(self.a_sample).sum().div(num_el)
 
         # create transitional distribution --> p(z_T|z_{T-1})p(z_{T-1}|z_{T-2}) ... p(z_2|z_1)p(z_1)
         z_transition = torch.matmul(A, z_sample.view(self.x.size(0), self.x.size(1), -1).unsqueeze(-1)).squeeze(-1)
         p_zT_given_zt = MultivariateNormal(loc=z_transition, 
                                            scale_tril=torch.linalg.cholesky(self.kalman_filter.Q))
-        log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample.view(self.x.size(0), self.x.size(1), -1))
+        log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample.view(self.x.size(0), self.x.size(1), -1)).sum().div(num_el)
         
-        print(log_q_a_given_x.size())
-        print(log_p_x_given_a.size())
-        print(log_p_z_given_a.size())
-        print(log_p_a_given_z.size())
-        print(log_p_zT_given_zt.size())
+        loss_dict = {'reconstruction loss': log_p_x_given_a.detach().numpy(),
+                     'encoder loss': log_q_a_given_x.detach().numpy(), 
+                     'LGSSM observation log likelihood': log_p_a_given_z.detach().numpy(),
+                     'LGSSM tranisition log likelihood': log_p_zT_given_zt.detach().numpy(), 
+                     'LGSSM tranisition log posterior': log_p_z_given_a.detach().numpy()}
 
-        return log_p_x_given_a + log_q_a_given_x + log_p_z_given_a + log_p_a_given_z + log_p_zT_given_zt
+        return self.recon_scale*log_p_x_given_a + log_q_a_given_x + log_p_z_given_a + log_p_a_given_z + log_p_zT_given_zt, loss_dict
 
