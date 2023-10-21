@@ -12,6 +12,11 @@ from torch.utils.data import DataLoader
 def train(train_loader, kvae, optimizer, args):
 
     loss_epoch = 0.
+    idv_losses = {'reconstruction loss': 0,
+                  'encoder loss': 0, 
+                  'LGSSM observation log likelihood': 0,
+                  'LGSSM tranisition log likelihood': 0, 
+                  'LGSSM tranisition log posterior': 0}
 
     for _, sample in enumerate(train_loader, 1):
 
@@ -20,21 +25,25 @@ def train(train_loader, kvae, optimizer, args):
         sample = sample.cuda().float()
 
         x_hat, A, C = kvae(sample)
-        loss = kvae.calculate_loss(A, C)
+        loss, loss_dict = kvae.calculate_loss(A, C)
 
         loss.backward()
 
         optimizer.step()
 
+        # TODO: add option to train with masking
         # TODO: add calculation of MSE
         # TODO: add gradient clipping
 
         loss_epoch += loss
-    
-    return loss_epoch/len(train_loader)
 
-def test(valid_loader, kvae, optimizer, args):
-    return None
+        for key in idv_losses.keys():
+            idv_losses[key] += loss_dict[key]
+    
+    for key in idv_losses.keys():
+        idv_losses[key] = loss_dict[key]/len(train_loader)
+
+    return loss_epoch/len(train_loader), idv_losses
 
 def main(args):
 
@@ -44,7 +53,6 @@ def main(args):
     train_dl = BouncingBallDataLoader(train_dir, images=True)
     test_dl = BouncingBallDataLoader(test_dir, images=True)
     train_loader = DataLoader(train_dl, batch_size=args.batch_size, shuffle=True)
-    valid_loader = DataLoader(test_dl, batch_size=args.batch_size, shuffle=True)
 
     it = iter(train_loader)
     first = next(it)
@@ -68,6 +76,7 @@ def main(args):
     else:
         params = [kvae.A, kvae.B, kvae.C] + list(kvae.encoder.parameters()) + list(kvae.decoder.parameters())
     optimizer = torch.optim.Adam(params, lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma = 0.85)
 
     # helper variables
     start = time.time()
@@ -79,12 +88,24 @@ def main(args):
     save_filename = args.output_folder + '/{}'.format(args.dataset) + '/{}'.format(run_name) 
     if not os.path.isdir(save_filename):
         os.makedirs(save_filename)
+    print(args.use_wandb)
     if args.use_wandb:
-        run = wandb.init(project="autoregressive-trasformer", 
+        if n_channels_in == 1:
+            binary = True
+        else:
+            binary = False
+        run = wandb.init(project="KalmanVAE", 
                         config={"dataset" : args.dataset,
-                                "batch size" : args.batch_size,
+                                "binary" : binary,
+                                "train-with-masking": args.train_with_masking,
+                                "batch-size" : args.batch_size,
                                 "iterations" : args.num_epochs,
-                                "learning rate" : args.lr},
+                                "learning-rate" : args.lr, 
+                                "learning-rate-scheduler": args.lr_scheduler, 
+                                "grad-clipping": args.use_grad_clipping,
+                                "a-dimensions": args.dim_a, 
+                                "z-dimensions": args.dim_z, 
+                                "number-of-dynamics-K": args.K},
                         name=run_name)
 
     # define number of epochs when NOT to train Dynamic Parameter Network
@@ -94,17 +115,15 @@ def main(args):
     for epoch in range(args.num_epochs):
         
         # delay training of Dynamics Parameter Network to epoch = n_epoch_initial
-        if epoch < n_epoch_initial:
-            for param in kvae.dynamics_net.parameters():
-                param.requires_grad = False
-        elif epoch == n_epoch_initial:
-            for param in kvae.dynamics_net.parameters():
-                param.requires_grad = True
+        if epoch == n_epoch_initial:
+            optimizer.add_param_group({'params': kvae.dynamics_net.parameters()})
         
         # train 
-        loss_train = train(train_loader, kvae, optimizer, args)
+        loss_train, loss_dict = train(train_loader, kvae, optimizer, args)
         if args.use_wandb:
-            run.log({"loss_train": loss_train})
+            run.log(loss_dict)
+        if epoch+1 % 20 == 0:
+            scheduler.step()
         end = time.time()
         log = 'epoch = {}, loss_train = {}, time = {}'.format(epoch+1, loss_train, end-start)
         start = end
@@ -112,7 +131,7 @@ def main(args):
         log_list.append(log + '\n')
 
         # save checkpoints 
-        if epoch % 10 == 0:
+        if epoch % 10 == 0 or epoch == args.num_epochs-1:
             with open(save_filename + '/kvae' + str(epoch+1) + '.pt', 'wb') as f:
                 torch.save(kvae.state_dict(), f)
         
@@ -120,7 +139,6 @@ def main(args):
         with open(save_filename + '/training.cklog', "a+") as log_file:
             log_file.writelines(log_list)
             log_list.clear()
-
 
 if __name__ == '__main__':
     import argparse
@@ -134,6 +152,8 @@ if __name__ == '__main__':
         help='dataset used')
     parser.add_argument('--n_channels_in', type=int, default=1,
         help='number of color channels in the data')
+    parser.add_argument('--train_with_masking', type=bool, default=False, 
+        help='training with masked sequences')
 
     # encoder parameters
     parser.add_argument('--dim_a', type=int, default=2,
@@ -148,12 +168,14 @@ if __name__ == '__main__':
     # training parameters
     parser.add_argument('--batch_size', type=int, default=64,
         help='batch size for training')
-    parser.add_argument('--lr', type=float, default=0.001,
+    parser.add_argument('--lr', type=float, default=0.0001,
         help='learning rate for training')
     parser.add_argument('--num_epochs', type=int, default=100,
         help='number of epochs (default: 100)')
     parser.add_argument('--use_grad_clipping', type=bool, default=False,
         help='use gradient clipping')
+    parser.add_argument('--lr_scheduler', type=str, default='Exponential', 
+        help='type of learning rate scheduler to use')
     
     # logistics
     parser.add_argument('--datasets_root_dir', type=str, default="/data2/users/lr4617/data/",

@@ -113,6 +113,7 @@ class KalmanVAE(nn.Module):
         # so the estimantion of log(p_{theta}(x|a)) is equal to 
         # the evaluation of a Normal distribution with x=ground-truth, 
         # mean=x_mean (from decoder) and covariance=x_cov (from decoder).
+        # print((self.x_mean.view(self.x.size(0), self.x.size(1), self.x.size(2), self.x.size(3), self.x.size(4)) - self.x).sum())
         self.x_dist = MultivariateNormal(loc=self.x_mean.view(self.x.size(0)*self.x.size(1), -1), 
                                          covariance_matrix=torch.diag_embed(self.x_std.view(self.x_std.size(0), -1)).to(self.x.get_device()))
         log_p_x_given_a = self.x_dist.log_prob(self.x.view(self.x.size(0)*self.x.size(1), -1)).sum().div(num_el)
@@ -143,11 +144,11 @@ class KalmanVAE(nn.Module):
                                            scale_tril=torch.linalg.cholesky(self.kalman_filter.Q))
         log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample.view(self.x.size(0), self.x.size(1), -1)).sum().div(num_el)
         
-        loss_dict = {'reconstruction loss': log_p_x_given_a.detach().numpy(),
-                     'encoder loss': log_q_a_given_x.detach().numpy(), 
-                     'LGSSM observation log likelihood': log_p_a_given_z.detach().numpy(),
-                     'LGSSM tranisition log likelihood': log_p_zT_given_zt.detach().numpy(), 
-                     'LGSSM tranisition log posterior': log_p_z_given_a.detach().numpy()}
+        loss_dict = {'reconstruction loss': self.recon_scale*log_p_x_given_a.detach().cpu().numpy(),
+                     'encoder loss': log_q_a_given_x.detach().cpu().numpy(), 
+                     'LGSSM observation log likelihood': log_p_a_given_z.detach().cpu().numpy(),
+                     'LGSSM tranisition log likelihood': log_p_zT_given_zt.detach().cpu().numpy(), 
+                     'LGSSM tranisition log posterior': log_p_z_given_a.detach().cpu().numpy()}
 
-        return self.recon_scale*log_p_x_given_a + log_q_a_given_x + log_p_z_given_a + log_p_a_given_z + log_p_zT_given_zt, loss_dict
+        return -self.recon_scale*log_p_x_given_a + log_q_a_given_x + log_p_z_given_a - log_p_a_given_z - log_p_zT_given_zt, loss_dict
 
