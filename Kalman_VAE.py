@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.distributions.multivariate_normal import MultivariateNormal
 
 from Kalman_Filter import Kalman_Filter
-from VAE import Gaussian_Encoder, Gaussian_Decoder
+from utils import Gaussian_Encoder, Gaussian_Decoder
 
 class KalmanVAE(nn.Module):
     
@@ -14,7 +14,7 @@ class KalmanVAE(nn.Module):
                  dim_z, 
                  K, 
                  T, 
-                 recon_scale=0.3,
+                 recon_scale=0.6,
                  dim_u=0):
         
         super(KalmanVAE, self).__init__()
@@ -61,7 +61,7 @@ class KalmanVAE(nn.Module):
         self.x = None
         self.a_sample = None
 
-        # initialize encoder 
+        # initialize encoder and decoder
         self.encoder = Gaussian_Encoder(channels_in=n_channels_in, 
                                         image_size=image_size, 
                                         a_dim=self.dim_a)
@@ -122,7 +122,6 @@ class KalmanVAE(nn.Module):
         #### LGSSM - part
         # first we create p_{gamma} (z|a) from the smoothed
         # means and covariances as a Multivariate Normal
-        
         p_z_given_a = MultivariateNormal(loc=torch.cat(self.smoothed_means), 
                                          scale_tril=torch.linalg.cholesky(torch.cat(self.smoothed_covariances)))
         
@@ -134,15 +133,17 @@ class KalmanVAE(nn.Module):
         # create p_{gamma} (a|z) = C (bs, seq_len, dim_a, dim_z) * z (bs, seq_len, dim_z)
         # and evaluate it with sample from a_dist
         a_transition = torch.matmul(C, z_sample.view(self.x.size(0), self.x.size(1), -1).unsqueeze(-1)).squeeze(-1)
-        p_a_given_z = MultivariateNormal(loc=a_transition, 
+        to_sample = self.a_sample.to(self.x.get_device()) - a_transition.to(self.x.get_device())
+        p_a_given_z = MultivariateNormal(loc=torch.zeros(self.dim_a).to(self.x.get_device()), 
                                          scale_tril=torch.linalg.cholesky(self.kalman_filter.R))
-        log_p_a_given_z = p_a_given_z.log_prob(self.a_sample).sum().div(num_el)
+        log_p_a_given_z = p_a_given_z.log_prob(to_sample).sum().div(num_el)
 
         # create transitional distribution --> p(z_T|z_{T-1})p(z_{T-1}|z_{T-2}) ... p(z_2|z_1)p(z_1)
         z_transition = torch.matmul(A, z_sample.view(self.x.size(0), self.x.size(1), -1).unsqueeze(-1)).squeeze(-1)
-        p_zT_given_zt = MultivariateNormal(loc=z_transition, 
+        to_sample = z_sample.view(self.x.size(0), self.x.size(1), -1) - z_transition
+        p_zT_given_zt = MultivariateNormal(loc=torch.zeros(self.dim_z).to(self.x.get_device()), 
                                            scale_tril=torch.linalg.cholesky(self.kalman_filter.Q))
-        log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample.view(self.x.size(0), self.x.size(1), -1)).sum().div(num_el)
+        log_p_zT_given_zt = p_zT_given_zt.log_prob(to_sample).sum().div(num_el)
         
         loss_dict = {'reconstruction loss': self.recon_scale*log_p_x_given_a.detach().cpu().numpy(),
                      'encoder loss': log_q_a_given_x.detach().cpu().numpy(), 
