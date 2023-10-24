@@ -4,6 +4,7 @@ import time
 import wandb
 import matplotlib.pyplot as plt 
 import os
+
 from VAE import VAE
 from datetime import datetime
 
@@ -11,11 +12,10 @@ from dataloaders.bouncing_data import BouncingBallDataLoader
 from torch.utils.data import DataLoader
 
 def loss_function(x, x_hat, mean, log_var):
-    reproduction_loss = nn.functional.binary_cross_entropy(x_hat, x, reduction='sum')
+    reproduction_loss = nn.functional.mse_loss(x_hat, x, reduction='sum')
     KLD = - 0.5 * torch.sum(1+ log_var - mean.pow(2) - log_var.exp())
 
     return reproduction_loss + KLD, [reproduction_loss, KLD]
-
 
 def train(train_loader, vae, optimizer, args):
     loss_epoch = 0.
@@ -26,9 +26,11 @@ def train(train_loader, vae, optimizer, args):
 
         optimizer.zero_grad()
         
-        sample = sample.cuda().float()
+        sample = sample.cuda().float().to(args.device)
 
-        x_hat, mean, std = vae(sample)
+        x_hat, mean, std = vae(sample.view(-1, *sample.shape[2:]))
+
+        x_hat = x_hat.view(sample.size(0), sample.size(1), *sample.shape[2:])
 
         loss, idv_losses_list = loss_function(sample, x_hat, mean, std)
 
@@ -44,15 +46,78 @@ def train(train_loader, vae, optimizer, args):
     for key in idv_losses.keys():
         idv_losses[key] = idv_losses[key]/len(train_loader)
 
-    return loss_epoch/len(train_loader), idv_losses
+    return (loss_epoch/len(train_loader)).item(), idv_losses
 
 def test(test_loader, vae, args):
-    pass
+    test_loss = 0.
+    idv_losses = {'reconstruction-loss': 0,
+                  'KL-loss': 0}
+    
+    with torch.no_grad():
+        for _, sample in enumerate(test_loader, 1):
+
+            sample = sample.cuda().float().to(args.device)
+
+            x_hat, mean, std = vae(sample.view(sample.size(0)*sample.size(1), *sample.shape[2:]))
+            
+            x_hat = x_hat.view(sample.size(0),sample.size(1),*sample.shape[2:])
+
+            loss, idv_losses_list = loss_function(sample, x_hat, mean, std)
+
+            idv_losses['reconstruction-loss'] += idv_losses_list[0]
+            idv_losses['KL-loss'] += idv_losses_list[1]
+
+            test_loss += loss
+
+        for key in idv_losses.keys():
+            idv_losses[key] = idv_losses[key]/len(test_loader)
+
+    return (test_loss/len(test_loader)).item(), idv_losses
+
+def test_reconstruction(test_loader, vae, output_folder, args):
+
+    vae.eval()
+    with torch.no_grad():
+        mse_error = 0
+        for i, sample in enumerate(test_loader, 1):
+
+            sample = sample.cuda().float()
+            B, T, C, d1, d2 = sample.size()
+
+            # get mean-squared-error on test data
+            x_hat, mean, std = vae(sample.view(sample.size(0)*sample.size(1), *sample.shape[2:]))
+            x_hat = x_hat.view(B, T, C, d1, d2)
+            mse = nn.MSELoss()
+            mse_error += mse(x_hat, sample)
+            
+            # revert sample to showable format
+            sample = sample.cpu().numpy()
+
+            # visualize difference between sample and reconstruction
+            if i == 1:
+                for sample_num in range(5):
+                    fig, axs = plt.subplots(2, 6, figsize=(15, 8))
+                    fig.suptitle('Reconstruction-Orginal Comparison')
+                    for j, t in enumerate(range(0, T, 9)):
+                        axs[0, j].title.set_text('Ground-Truth, t={}'.format(str(t)))
+                        axs[0, j].imshow(sample[sample_num, t, 0, :, :]*255, cmap='gray', vmin=0, vmax=255)
+                        axs[1, j].title.set_text('Reconstructions, t={}'.format(str(t)))
+                        pred_to_plot = x_hat[sample_num, t, 0, :, :]*255
+                        axs[1, j].imshow(pred_to_plot.cpu().numpy(), cmap='gray', vmin=0, vmax=255)
+    
+                    fig.savefig(output_folder + '/reconstruction_{}'.format(str(sample_num+1)))
+
+            # visualize differences in trajectories between sample and reconstruction
+            # TODO
+
+        print('Test Mean-Squared-Error: ', mse_error/len(test_loader))
+
 
 def generate(vae):
     pass
 
 def main(args):
+
     # load data
     train_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'train')
     test_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'test')
@@ -69,7 +134,7 @@ def main(args):
     # load model
     vae = VAE(n_channels_in,
               dim,
-              latent_dim=2).cuda()
+              latent_dim=2).cuda().to('cuda:' + str(args.device))
 
     # if already trained, load checkpoints
     if args.vae_model is not None:
@@ -79,7 +144,6 @@ def main(args):
         # define optimizer
         optimizer = torch.optim.Adam(vae.parameters(), lr=args.lr) 
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma = args.gamma_lr_schedule)
-
 
         # helper variables
         start = time.time()
@@ -111,6 +175,7 @@ def main(args):
                                     "beta": args.beta},
                             name=run_name)
 
+        # train
         for epoch in range(args.num_epochs):
 
             # train and save log
@@ -146,10 +211,13 @@ def main(args):
     
     if args.test:
         if not args.train:
-            path_to_dir = args.kvae_model.split('/')[:-1]
+            path_to_dir = args.vae_model.split('/')[:-1]
             save_filename = "/".join(path_to_dir) 
-
-
+        
+        output_folder = os.path.join(save_filename + '/reconstructions')
+        if not os.path.exists('{}'.format(output_folder)):
+            os.makedirs(output_folder)
+        test_reconstruction(test_loader, vae, output_folder, args)
 
 if __name__ == '__main__':
     import argparse
@@ -195,7 +263,8 @@ if __name__ == '__main__':
         help='location to save kave model and results')
     parser.add_argument('--use_wandb', type=int, default=None,
         help='use weights and biases to track expriments')
-    
+    parser.add_argument('--device', type=int, default=0,
+        help='cuda device to use')
     # get arguments
     args = parser.parse_args()
 

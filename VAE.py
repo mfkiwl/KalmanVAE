@@ -3,18 +3,18 @@ import torch.nn as nn
 
 from utils import Gaussian_Encoder, Gaussian_Decoder
 
-class AE(nn.Module):
+class VAE(nn.Module):
 
     def __init__(self,
                  n_channels_in,
                  images_size, 
-                 laten_dim):
+                 latent_dim):
         
-        super(AE, self).__init__()
+        super(VAE, self).__init__()
 
         self.n_channels_in = n_channels_in
         self.image_size = images_size
-        self.latent_dim = laten_dim
+        self.latent_dim = latent_dim
 
         self.encoder = Gaussian_Encoder(channels_in=n_channels_in, 
                                         image_size=self.image_size, 
@@ -31,6 +31,6 @@ class AE(nn.Module):
     def forward(self, x):
         mean, std = self.encoder(x)
         gaussian_sample = mean + std*torch.randn_like(std)
-        reconstructions = self.decoder(gaussian_sample, recon_only=True)
+        reconstructions = self.decoder(gaussian_sample, recon_only=True, clip=True)
 
         return reconstructions, mean, std

@@ -64,11 +64,11 @@ class KalmanVAE(nn.Module):
         # initialize encoder and decoder
         self.encoder = Gaussian_Encoder(channels_in=n_channels_in, 
                                         image_size=image_size, 
-                                        a_dim=self.dim_a)
+                                        latent_dim=self.dim_a)
         
         self.decoder = Gaussian_Decoder(channels_in=n_channels_in, 
                                         image_size=image_size, 
-                                        a_dim=self.dim_a)
+                                        latent_dim=self.dim_a)
 
     def forward(self, x):
         

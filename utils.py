@@ -94,7 +94,7 @@ class Gaussian_Decoder(nn.Module):
         for i, n_channel in enumerate(n_channels):
             if i > 0:
                 in_channels = n_channels[i-1]
-
+            print(in_channels, n_channel)
             modules.append(nn.ConvTranspose2d(in_channels=in_channels,
                                               out_channels=n_channel, 
                                               kernel_size=kernel_size, 
@@ -106,11 +106,11 @@ class Gaussian_Decoder(nn.Module):
 
         if self.latent_dim > 0:
             self.to_mean = nn.ConvTranspose2d(in_channels=n_channels[-1],
-                                            out_channels=channels_in, 
-                                            kernel_size=kernel_size,
-                                            stride=1, 
-                                            padding=1, 
-                                            output_padding=0)
+                                              out_channels=channels_in, 
+                                              kernel_size=kernel_size,
+                                              stride=1, 
+                                              padding=1, 
+                                              output_padding=0)
             
             self.to_std = nn.ConvTranspose2d(in_channels=n_channels[-1],
                                             out_channels=channels_in, 
@@ -121,7 +121,7 @@ class Gaussian_Decoder(nn.Module):
         
         self.n_channels = n_channels # reversed wrt to input in constructor
         
-    def forward(self, encodings, recon_only=False):
+    def forward(self, encodings, recon_only=False, clip=True):
         if self.latent_dim > 0:
             x = F.relu(self.to_conv(encodings)).view(-1, 
                                                     self.n_channels[0], 
@@ -130,11 +130,17 @@ class Gaussian_Decoder(nn.Module):
 
         for deconv_layer in self.conv_tranpose_modules:
             x = F.relu(deconv_layer(x))
+        x = self.to_mean(x)
+        if clip:
+            x = x.clamp(0., 1.)
 
         if self.latent_dim > 0 and not recon_only:
             mean = self.to_mean(x)
             std = F.softplus(self.to_std(x))
             x_hat = mean + std*torch.randn_like(std)
+            if clip:
+                x_hat = x_hat.clamp(0., 1.)
+
             return x_hat, mean, std
         
         else:

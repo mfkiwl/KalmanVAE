@@ -10,8 +10,6 @@ from datetime import datetime
 from dataloaders.bouncing_data import BouncingBallDataLoader
 from torch.utils.data import DataLoader
 
-
-
 def train(train_loader, kvae, optimizer, args):
 
     loss_epoch = 0.
@@ -44,13 +42,9 @@ def train(train_loader, kvae, optimizer, args):
             idv_losses[key] += loss_dict[key]
     
     for key in idv_losses.keys():
-        ###### TODO: change loss_dict --> idv_losses
-        idv_losses[key] = loss_dict[key]/len(train_loader)
+        idv_losses[key] = idv_losses[key]/len(train_loader)
 
     return loss_epoch/len(train_loader), idv_losses
-
-def normalize_images(img, max, min):
-    return (img - min)/(max - min)
 
 def test_reconstruction(test_loader, kvae, output_folder, args):
 
@@ -67,10 +61,6 @@ def test_reconstruction(test_loader, kvae, output_folder, args):
             x_hat = x_hat.view(B, T, C, d1, d2)
             mse = nn.MSELoss()
             mse_error += mse(x_hat, sample)
-
-            # normalize predicted video
-            if args.normalize_all:
-                x_hat_norm = normalize_images(x_hat, torch.max(x_hat), torch.min(x_hat)).detach().cpu().numpy()
             
             # revert sample to showable format
             sample = sample.cpu().numpy()
@@ -84,12 +74,9 @@ def test_reconstruction(test_loader, kvae, output_folder, args):
                         axs[0, j].title.set_text('Ground-Truth, t={}'.format(str(t)))
                         axs[0, j].imshow(sample[sample_num, t, 0, :, :]*255, cmap='gray', vmin=0, vmax=255)
                         axs[1, j].title.set_text('Reconstructions, t={}'.format(str(t)))
-                        if not args.normalize_all:
-                            x_hat_norm = x_hat[sample_num, t, 0, :, :]
-                            x_hat_norm = normalize_images(x_hat_norm, torch.max(x_hat_norm), torch.min(x_hat_norm)).detach().cpu().numpy()
-                            axs[1, j].imshow(x_hat_norm*255, cmap='gray', vmin=0, vmax=255)
-                        else:
-                            axs[1, j].imshow(x_hat_norm[sample_num, t, 0, :, :]*255, cmap='gray', vmin=0, vmax=255)
+                        pred_to_plot = x_hat[sample_num, t, 0, :, :]*255
+                        axs[1, j].imshow(pred_to_plot.cpu().numpy(), cmap='gray', vmin=0, vmax=255)
+    
                     fig.savefig(output_folder + '/reconstruction_{}'.format(str(sample_num+1)))
 
             # visualize differences in trajectories between sample and reconstruction
@@ -110,7 +97,6 @@ def main(args):
     print('MODEL PATH', args.kvae_model)
     print('TRAIN: ', args.train)
     print('TEST: ', args.test)
-    print('NORMALIZE ALL', args.normalize_all)
     print('########################################')
 
     # load data
@@ -233,14 +219,8 @@ def main(args):
         if not args.train:
             path_to_dir = args.kvae_model.split('/')[:-1]
             save_filename = "/".join(path_to_dir) 
-
-        print(save_filename)
-
-        if not args.normalize_all:
-            print("Single Normalization ---")
-            output_folder = os.path.join(save_filename + '/reconstructions_single_norm')
-        else:
-            output_folder = os.path.join(save_filename + '/reconstructions')
+        
+        output_folder = os.path.join(save_filename + '/reconstructions')
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
         test_reconstruction(test_loader, kvae, output_folder, args)
@@ -302,8 +282,6 @@ if __name__ == '__main__':
     # testing parameters
     parser.add_argument('--test', type=int, default=None,
         help='test model')
-    parser.add_argument('--normalize_all', type=int, default=None,
-        help='normalize to 0-1 predictions to plot with max/min taken over all samples')
     # TODO: add args for testing generations and imputations
 
     # logistics
