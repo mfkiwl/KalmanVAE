@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as Distributions
 
+def log_likelihood(x, mean, var, device):
+    c = (- 0.5 * torch.log(torch.tensor([2 * torch.pi]))).to(device)
+    return c - (torch.log(var)/2 - torch.square(x-mean)/(2*var))
 
 def compute_convolution_output_size(image_size, n_channels, kernel_size):
     out_sizes = []
@@ -15,7 +18,6 @@ def compute_convolution_output_size(image_size, n_channels, kernel_size):
         out_sizes.append(out_size)
 
     return out_sizes
-
 
 class Gaussian_Encoder(nn.Module):
     def __init__(self, 
@@ -74,11 +76,13 @@ class Gaussian_Decoder(nn.Module):
                  image_size,
                  latent_dim=0, 
                  n_channels=[16, 32, 64], 
-                 kernel_size=3):
+                 kernel_size=3, 
+                 out_var=0.1):
         
         super(Gaussian_Decoder, self).__init__()
 
         self.latent_dim = latent_dim
+        self.var = out_var
         self.conv_out_size = compute_convolution_output_size(image_size, n_channels, kernel_size)
         in_channels = n_channels[-1]
 
@@ -94,7 +98,6 @@ class Gaussian_Decoder(nn.Module):
         for i, n_channel in enumerate(n_channels):
             if i > 0:
                 in_channels = n_channels[i-1]
-            print(in_channels, n_channel)
             modules.append(nn.ConvTranspose2d(in_channels=in_channels,
                                               out_channels=n_channel, 
                                               kernel_size=kernel_size, 
@@ -111,13 +114,6 @@ class Gaussian_Decoder(nn.Module):
                                               stride=1, 
                                               padding=1, 
                                               output_padding=0)
-            
-            self.to_std = nn.ConvTranspose2d(in_channels=n_channels[-1],
-                                            out_channels=channels_in, 
-                                            kernel_size=kernel_size, 
-                                            stride=1, 
-                                            padding=1, 
-                                            output_padding=0)
         
         self.n_channels = n_channels # reversed wrt to input in constructor
         
@@ -130,18 +126,19 @@ class Gaussian_Decoder(nn.Module):
 
         for deconv_layer in self.conv_tranpose_modules:
             x = F.relu(deconv_layer(x))
-        x = self.to_mean(x)
-        if clip:
-            x = x.clamp(0., 1.)
+        
+        if recon_only:
+            x = self.to_mean(x)
+            if clip:
+                x = x.clamp(0., 1.)
 
         if self.latent_dim > 0 and not recon_only:
             mean = self.to_mean(x)
-            std = F.softplus(self.to_std(x))
-            x_hat = mean + std*torch.randn_like(std)
+            x_hat = mean + torch.sqrt(self.var)*torch.randn_like(mean)
             if clip:
                 x_hat = x_hat.clamp(0., 1.)
 
-            return x_hat, mean, std
+            return x_hat, mean
         
         else:
             return x

@@ -112,9 +112,12 @@ def test_reconstruction(test_loader, vae, output_folder, args):
 
         print('Test Mean-Squared-Error: ', mse_error/len(test_loader))
 
-
-def generate(vae):
-    pass
+def generate_samples(vae):
+    vae.eval()
+    with torch.no_grad():
+        for mean in range(-5., 5., 0.5):
+            for std in range(-1., 0, 1.):
+                pass
 
 def main(args):
 
@@ -218,6 +221,11 @@ def main(args):
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
         test_reconstruction(test_loader, vae, output_folder, args)
+
+        output_folder = os.path.join(save_filename + '/generations')
+        if not os.path.exists('{}'.format(output_folder)):
+            os.makedirs(output_folder)
+        generate_samples(test_loader, vae, output_folder, args)
 
 if __name__ == '__main__':
     import argparse

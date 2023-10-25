@@ -23,7 +23,7 @@ def train(train_loader, kvae, optimizer, args):
 
         optimizer.zero_grad()
         
-        sample = sample.cuda().float()
+        sample = sample.cuda().float().to('cuda:' + str(args.device))
 
         x_hat, A, C = kvae(sample)
         loss, loss_dict = kvae.calculate_loss(A, C)
@@ -53,7 +53,7 @@ def test_reconstruction(test_loader, kvae, output_folder, args):
         mse_error = 0
         for i, sample in enumerate(test_loader, 1):
 
-            sample = sample.cuda().float()
+            sample = sample.cuda().float().to('cuda:' + str(args.device))
             B, T, C, d1, d2 = sample.size()
 
             # get mean-squared-error on test data
@@ -83,7 +83,6 @@ def test_reconstruction(test_loader, kvae, output_folder, args):
             # TODO
 
         print('Test Mean-Squared-Error: ', mse_error/len(test_loader))
-
 
 def test_generation(test_loader, kvae, args):
     pass
@@ -119,7 +118,7 @@ def main(args):
                      args.dim_z, 
                      args.K, 
                      T=T, 
-                     recon_scale=args.recon_scale).cuda()
+                     recon_scale=args.recon_scale).cuda().to('cuda:' + str(args.device))
     
     # if already trained, load checkpoints
     if args.kvae_model is not None:
@@ -268,7 +267,7 @@ if __name__ == '__main__':
         help='batch size for training')
     parser.add_argument('--lr', type=float, default=0.0001,
         help='learning rate for training')
-    parser.add_argument('--num_epochs', type=int, default=100,
+    parser.add_argument('--num_epochs', type=int, default=150,
         help='number of epochs (default: 100)')
     parser.add_argument('--use_grad_clipping', type=bool, default=False,
         help='use gradient clipping')
@@ -293,6 +292,8 @@ if __name__ == '__main__':
         help='location to save kave model and results')
     parser.add_argument('--use_wandb', type=int, default=None,
         help='use weights and biases to track expriments')
+    parser.add_argument('--device', type=int, default=None,
+        help='cuda device to use')
     
     # get arguments
     args = parser.parse_args()
