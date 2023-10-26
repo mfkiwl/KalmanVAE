@@ -16,7 +16,7 @@ class KalmanVAE(nn.Module):
                  T, 
                  recon_scale=0.6,
                  dim_u=0, 
-                 x_var=1):
+                 x_var=0.01):
         
         super(KalmanVAE, self).__init__()
         
@@ -181,11 +181,20 @@ class KalmanVAE(nn.Module):
         seq_len = x.size(1)
         
         # convert mask to torch tensor
-        mask_t = torch.ones_like(x)
-        mask_t = torch.Tensor(mask) * mask_t
+        mask_t = torch.Tensor(mask).unsqueeze(0).unsqueeze(2).unsqueeze(3).unsqueeze(4).repeat(bs, 1, 1, x.size(3), x.size(4)).to(x.get_device())
 
         # mask input:
         x_masked = mask_t*x
+
+        '''
+        # TEST for verifying mask application
+        print(mask)
+        sum_ = 0.
+        for t in range(seq_len):
+            if mask[t] == 0:
+                sum_ += x_masked[:, t, :, :, :].sum()
+        print(sum_)
+        '''
 
         # feed masked sample in encoder
         a_mean, a_std = self.encoder(x.view(-1,*x_masked.shape[2:]))
@@ -193,18 +202,23 @@ class KalmanVAE(nn.Module):
         # sample from q_{phi} (a|x)
         a_sample = (a_mean + a_std*torch.normal(mean=torch.zeros_like(a_mean))).view(bs, seq_len, self.dim_a)
 
+        # estimate observation from filtered posterior
         for t, mask_el in enumerate(mask):
             if mask_el != 0:
                 continue
             else:
                 # get filtered distribution up to t=t-1
-                _, _, _, _, next_means, next_covariances, A, C = self.kalman_filter.filter(a_sample[0:t-1], device=self.x.get_device())
-                a_sample[t] = torch.matmul(C[:, t, :, :], next_means[t].unsqueeze(2)).squeeze(2)
+                _, _, _, _, next_means, _, A, C = self.kalman_filter.filter(a_sample, device=self.x.get_device())
+                a_sample[:, t, :] = torch.matmul(C[:, t, :, :], torch.cat(next_means).view(-1, seq_len, self.dim_z)[:, t, :].unsqueeze(-1)).squeeze(-1)
         
-        smoothed_means, _ = self.kalman_filter.smooth(a_sample, params=[A, C])
+        # get filtered+smoothed distribution and smoothed observations
+        params = self.kalman_filter.filter(a_sample, device=self.x.get_device())
+        smoothed_means, _ = self.kalman_filter.smooth(a_sample, params=params)
+        smoothed_obs = torch.matmul(C, torch.cat(smoothed_means).view(-1, seq_len, self.dim_z).unsqueeze(-1)).squeeze(1)
+
+        # decode smoothed observations
+        imputed_data, _ = self.decoder(smoothed_obs.view(bs*seq_len, -1))
+
+        return imputed_data.view(bs, seq_len, *x.shape[2:])
         
-
-                
-
-
         

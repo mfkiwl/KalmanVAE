@@ -3,6 +3,7 @@ import torch.nn as nn
 import time
 import wandb
 import matplotlib.pyplot as plt 
+import random
 
 from Kalman_VAE import KalmanVAE
 from datetime import datetime
@@ -82,13 +83,53 @@ def test_reconstruction(test_loader, kvae, output_folder, args):
             # visualize differences in trajectories between sample and reconstruction
             # TODO
 
-        print('Test Mean-Squared-Error: ', mse_error/len(test_loader))
+        print('Reconstruction Mean-Squared-Error: ', mse_error/len(test_loader))
+
+def test_imputation(test_loader, kvae, mask, output_folder, args):
+    kvae.eval()
+    with torch.no_grad():
+        mse_error = 0
+        for i, sample in enumerate(test_loader, 1):
+
+            sample = sample.cuda().float().to('cuda:' + str(args.device))
+            B, T, C, d1, d2 = sample.size()
+
+            # get imputations
+            imputed_seq = kvae.impute(sample, mask)
+            mse = nn.MSELoss()
+            mse_error += mse(imputed_seq, sample)
+
+            # revert sample to showable format
+            sample = sample.cpu().numpy()
+
+            # visualize difference between sample and reconstruction
+            if i == 1:
+                for sample_num in range(20):
+                    zeros_in_mask = [i for i in range(len(mask)) if mask[i] == 0.]
+                    fig, axs = plt.subplots(2, 12, figsize=(8, 3))
+                    fig.suptitle('Ground-Truth - Imputation Comparison ({}%)'.format(args.masking_fraction))
+                    for j, t in enumerate(zeros_in_mask):
+                        axs[0, j].set_title('GT, t={}'.format(str(t)), fontsize=7)
+                        axs[0, j].imshow(sample[sample_num, t, 0, :, :]*255, cmap='gray', vmin=0, vmax=255)
+                        axs[1, j].set_title('IM, t={}'.format(str(t)), fontsize=7)
+                        pred_to_plot = imputed_seq[sample_num, t, 0, :, :]*255
+                        axs[1, j].imshow(pred_to_plot.cpu().numpy(), cmap='gray', vmin=0, vmax=255)
+                        axs[0, j].grid(False)
+                        axs[0, j].set_xticks([])
+                        axs[0, j].set_yticks([])
+                        axs[1, j].grid(False)
+                        axs[1, j].set_xticks([])
+                        axs[1, j].set_yticks([])
+
+
+                    fig.savefig(output_folder + '/Imputation{}'.format(str(sample_num+1)))
+        
+        print('Imputation Mean-Squared-Error: ', mse_error/len(test_loader))
 
 def test_generation(test_loader, kvae, args):
     pass
+    
 
-def test_imputation(test_loader, kvae, args):
-    pass
 
 def main(args):
 
@@ -135,17 +176,18 @@ def main(args):
 
         # helper variables
         start = time.time()
-        log_list = []
-
-        # define filename
-        now = datetime.now()
-        run_name = 'run_' + now.strftime("%Y_%m_%d_%H_%M_%S")
-        save_filename = args.output_folder + '/{}'.format(args.dataset) + '/{}'.format(run_name) 
-        if not os.path.isdir(save_filename):
-            os.makedirs(save_filename)
+        log_list = []        
         
         # set parameters for wandb
         if args.use_wandb:
+
+            # define filename
+            now = datetime.now()
+            run_name = 'run_' + now.strftime("%Y_%m_%d_%H_%M_%S")
+            save_filename = args.output_folder + '/{}'.format(args.dataset) + '/{}'.format(run_name) 
+            if not os.path.isdir(save_filename):
+                os.makedirs(save_filename)
+
             if n_channels_in == 1:
                 binary = True
             else:
@@ -210,7 +252,8 @@ def main(args):
     #    - visual comparison with different numbers of starting frames
     # 3. Test frame imputation
     #    - visual comparison for both random and consecutive frame omission
-    #      including both initial and final frames 
+    #      including both initial and final frames + mse error comparison 
+    #      with reconstruction results (here set benchmark for empy frame)
     # 4. Reproduce results for Dyanmic Parameter Network
     #    - visual comparison of the the different K=3 dynamics
     if args.test:
@@ -224,15 +267,24 @@ def main(args):
             os.makedirs(output_folder)
         test_reconstruction(test_loader, kvae, output_folder, args)
 
+        
+        mask = [1] * T
+        n_of_samples_to_mask = int((T - 8)*args.masking_fraction)
+        to_zero_sorted = random.sample(range(4, T-4), n_of_samples_to_mask)
+        for mask_idx in range(len(mask)):
+            if mask_idx in to_zero_sorted:
+                mask[mask_idx] = 0
+        print(args.masking_fraction)
+        print(mask)
+        output_folder = os.path.join(save_filename + '/imputations_{}'.format(str(int(args.masking_fraction*100))))
+        if not os.path.exists('{}'.format(output_folder)):
+            os.makedirs(output_folder)
+        test_imputation(test_loader, kvae, mask, output_folder, args)
+
         output_folder = os.path.join(save_filename + '/generations')
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
         test_generation(test_loader, kvae, args)
-
-        output_folder = os.path.join(save_filename + '/imputations')
-        if not os.path.exists('{}'.format(output_folder)):
-            os.makedirs(output_folder)
-        test_imputation(test_loader, kvae, args)
 
 
 if __name__ == '__main__':
@@ -281,7 +333,8 @@ if __name__ == '__main__':
     # testing parameters
     parser.add_argument('--test', type=int, default=None,
         help='test model')
-    # TODO: add args for testing generations and imputations
+    parser.add_argument('--masking_fraction', type=float, default=0.3, 
+        help='fraction fo sample being masked for testing imputation')
 
     # logistics
     parser.add_argument('--datasets_root_dir', type=str, default="/data2/users/lr4617/data/",
