@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import torch.distributions as Distributions
 
 from Kalman_Filter import Kalman_Filter
+from filterpy.kalman import KalmanFilter
 
 # test torch.distribution sizes
 dist = Distributions.Normal(loc=torch.randn(64,50,1,16,16), scale=torch.ones(64,50,1,16,16))

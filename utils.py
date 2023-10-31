@@ -5,7 +5,8 @@ import torch.distributions as Distributions
 
 def log_likelihood(x, mean, var, device):
     c = (- 0.5 * torch.log(torch.tensor([2 * torch.pi]))).to(device)
-    return c - (torch.log(var)/2 - torch.square(x-mean)/(2*var))
+    ll = c + (- torch.log(var)/2 - torch.square(x-mean)/(2*var))
+    return ll
 
 def compute_convolution_output_size(image_size, n_channels, kernel_size):
     out_sizes = []

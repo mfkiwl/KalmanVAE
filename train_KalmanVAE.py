@@ -4,6 +4,7 @@ import time
 import wandb
 import matplotlib.pyplot as plt 
 import random
+import numpy as np
 
 from Kalman_VAE import KalmanVAE
 from datetime import datetime
@@ -102,13 +103,21 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
             # revert sample to showable format
             sample = sample.cpu().numpy()
 
+            zeros_idxs_in_mask = [i for i in range(len(mask)) if mask[i] == 0.]
+            if args.masking_fraction > 0.25:
+                n_of_images_to_show = 12
+                idxs_to_show = np.sort(np.random.choice(range(0, len(zeros_idxs_in_mask)+1), size=n_of_images_to_show, replace=False))
+            else:
+                n_of_images_to_show = len(zeros_idxs_in_mask)
+                idxs_to_show = [n for n in range(n_of_images_to_show)]
+
             # visualize difference between sample and reconstruction
             if i == 1:
                 for sample_num in range(20):
-                    zeros_in_mask = [i for i in range(len(mask)) if mask[i] == 0.]
-                    fig, axs = plt.subplots(2, 12, figsize=(8, 3))
-                    fig.suptitle('Ground-Truth - Imputation Comparison ({}%)'.format(args.masking_fraction))
-                    for j, t in enumerate(zeros_in_mask):
+                    fig, axs = plt.subplots(2, n_of_images_to_show, figsize=(8, 3))
+                    fig.suptitle('Ground-Truth - Imputation Comparison ({}%)'.format(int(args.masking_fraction*100)))
+                    for j, idx in enumerate(idxs_to_show):
+                        t = zeros_idxs_in_mask[idx]
                         axs[0, j].set_title('GT, t={}'.format(str(t)), fontsize=7)
                         axs[0, j].imshow(sample[sample_num, t, 0, :, :]*255, cmap='gray', vmin=0, vmax=255)
                         axs[1, j].set_title('IM, t={}'.format(str(t)), fontsize=7)
@@ -129,7 +138,6 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
 def test_generation(test_loader, kvae, args):
     pass
     
-
 
 def main(args):
 
@@ -214,7 +222,7 @@ def main(args):
         # 2. include training with masking
     
         # define number of epochs when NOT to train Dynamic Parameter Network
-        n_epoch_initial = 20
+        n_epoch_initial = 1
         for epoch in range(args.num_epochs):
             
             # delay training of Dynamics Parameter Network to epoch = n_epoch_initial
@@ -319,7 +327,7 @@ if __name__ == '__main__':
         help='batch size for training')
     parser.add_argument('--lr', type=float, default=0.0001,
         help='learning rate for training')
-    parser.add_argument('--num_epochs', type=int, default=150,
+    parser.add_argument('--num_epochs', type=int, default=100,
         help='number of epochs (default: 100)')
     parser.add_argument('--use_grad_clipping', type=bool, default=False,
         help='use gradient clipping')
