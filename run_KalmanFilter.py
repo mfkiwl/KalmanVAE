@@ -1,31 +1,12 @@
 import torch
+import os
 import matplotlib.pyplot as plt 
 import torch.distributions as Distributions
+import numpy as np
 
 from Kalman_Filter import Kalman_Filter
 from filterpy.kalman import KalmanFilter
 
-# test torch.distribution sizes
-dist = Distributions.Normal(loc=torch.randn(64,50,1,16,16), scale=torch.ones(64,50,1,16,16))
-print(dist.log_prob(torch.randn(16)).size())
-
-# Test Kalman Filter with random data
-dim_z = 2
-dim_a = dim_z
-
-sequence_len = 8
-batch_size = 16
-
-a = torch.randn(batch_size, sequence_len, dim_z)
-kalman_filter = Kalman_Filter(dim_z, 
-                              dim_a, 
-                              dim_u=0, 
-                              use_KVAE=False)
-
-params = kalman_filter.filter(a)
-means, covariances = kalman_filter.smooth(a, params)
-
-# Test Kalman Filter with synthetic data
 # create ground truth data
 T = 15
 start_Y = 10
@@ -47,9 +28,10 @@ for obs_idx in range(T):
     observations_seq.append([observations_X[obs_idx], observations_Y[obs_idx]])
 observations_seq = torch.tensor(observations_seq).unsqueeze(0)
 
+
 # initialize Kalman filter
 dim_z = 4
-dim_a = observations_seq.size(2)
+dim_a = 2
 delta = 0.5
 A_init = torch.FloatTensor([[1, 0, delta, 0], [0, 1, 0, delta], [0, 0, 1, 0], [0, 0, 0, 1]])
 C_init = torch.FloatTensor([[1, 0, 0, 0], [0, 1, 0, 0]])
@@ -69,7 +51,7 @@ kalman_filter = Kalman_Filter(dim_z,
                               use_KVAE=False)
 
 # filter observations
-mu, sigma, filtered_means, filtered_covariances, next_means, next_covariances, gamma = kalman_filter.filter(observations_seq)
+mu, sigma, filtered_means, filtered_covariances, next_means, next_covariances, A, C = kalman_filter.filter(observations_seq)
 filtered_X = []
 filtered_Y = []
 for _, loc in enumerate(filtered_means):
@@ -77,20 +59,48 @@ for _, loc in enumerate(filtered_means):
     filtered_Y.append(loc[0, 1].numpy())
 
 # smooth observations
-params = [mu, sigma, filtered_means, filtered_covariances, next_means, next_covariances, gamma]
+params = [mu, sigma, filtered_means, filtered_covariances, next_means, next_covariances, A, C]
 smoothed_means, smoothed_covariances = kalman_filter.smooth(observations_seq, params)
 
 # check for positive definite covariances in filtering and smoothing
-print(torch.linalg.cholesky(torch.cat(filtered_covariances)) is not None)
-print(torch.linalg.cholesky(torch.cat(smoothed_covariances)) is not None)
+if torch.linalg.cholesky(torch.cat(filtered_covariances)) is None or torch.linalg.cholesky(torch.cat(smoothed_covariances)) is None:
+    print("############# COVARIANCES ARE NOT PD #############")
 
 smoothed_X = []
 smoothed_Y = []
 for _, loc in enumerate(smoothed_means):
-    print(loc[0, 0:2])
     smoothed_X.append(loc[0, 0].numpy())
     smoothed_Y.append(loc[0, 1].numpy())
 
+
+# TEST data with Kalman filter
+kalman_filter = KalmanFilter(dim_x=dim_z, dim_z=dim_a)
+kalman_filter.x = mu_init.numpy().reshape(dim_z, 1)
+kalman_filter.P = sigma_init.numpy()
+kalman_filter.F = A_init.numpy()
+kalman_filter.H = C_init.numpy()
+mat_Q = Q_init * torch.eye(dim_z)
+mat_R = R_init * torch.eye(dim_a)
+kalman_filter.Q = mat_Q.numpy()
+kalman_filter.R = mat_R.numpy()
+
+means_gt, covariance_gt, filter_means_gt, filter_covs_gt = kalman_filter.batch_filter(observations_seq.permute(1, 0, 2).numpy())
+for h, loc in enumerate(filtered_means):
+    means_gt_X = means_gt[h, 0, 0]
+    means_gt_Y = means_gt[h, 1, 0]
+    filtered_X_h = loc[0, 0].numpy()
+    filtered_Y_h = loc[0, 1].numpy()
+
+    #print(np.abs(means_gt_X - filtered_X_h), np.abs(means_gt_Y - filtered_Y_h))
+
+smoothed_means_gt = kalman_filter.rts_smoother(means_gt, covariance_gt)[0]
+for h, loc in enumerate(smoothed_means):
+    means_gt_X = smoothed_means_gt[h, 0, 0]
+    means_gt_Y = smoothed_means_gt[h, 1, 0]
+    smoothed_X_h = loc[0, 0].numpy()
+    smoothed_Y_h = loc[0, 1].numpy()
+
+    #print(np.abs(means_gt_X - smoothed_X_h), np.abs(means_gt_Y - smoothed_Y_h))
 
 # plot all figures together
 fig_sum, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 6))
@@ -116,37 +126,7 @@ ax3.set_ylim([3,15])
 ax3.legend(loc='upper right')
 ax3.title.set_text('Kalman Smoothing')
 
-fig_sum.savefig('/data2/users/lr4617/Kalman_VAE/results/KalmanFilter/kalman_filter_all.png')
+fig_sum.savefig('/vol/bitbucket/lr4617/kalman_filter_all_2.png')
 
 
-# plot ground truth data + observations
-fig = plt.figure()
-plt.scatter(gt_seq_X, gt_seq_Y) 
-plt.scatter(observations_X, observations_Y, label='Observed')
-plt.plot(gt_seq_X, gt_seq_Y, label='Ground-Truth')
-plt.ylim([3,15])
-plt.show()
-fig.savefig('/data2/users/lr4617/Kalman_VAE/results/KalmanFilter/gt.png')
-
-
-# plot filtered data + observation
-fig_2 = plt.figure()
-plt.scatter(filtered_X, filtered_Y) 
-plt.scatter(observations_X, observations_Y, label='Observed')
-plt.plot(filtered_X, filtered_Y, label='Filtered')
-plt.ylim([3,15])
-plt.legend()
-plt.show()
-fig_2.savefig('/data2/users/lr4617/Kalman_VAE/results/KalmanFilter/filtered.png')
-
-
-# plot smoothed data + observation
-fig_2 = plt.figure()
-plt.scatter(smoothed_X, smoothed_Y) 
-plt.scatter(observations_X, observations_Y, label='Observed')
-plt.plot(smoothed_X, smoothed_Y, label='Smoothed')
-plt.ylim([3,15])
-plt.legend()
-plt.show()
-fig_2.savefig('/data2/users/lr4617/Kalman_VAE/results/KalmanFilter/smoothed.png')
-
+print(os.path.isfile('/data2/users/lr4617/Kalman_VAE/results/kalman_filter_all_2.png'))

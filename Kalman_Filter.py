@@ -73,6 +73,7 @@ class Kalman_Filter(nn.Module):
             if self.dim_u > 0:
                 self.B = nn.Parameter(self.B.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
             self.C = nn.Parameter(self.C.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
+            self.a_0 = nn.Parameter(torch.zeros(self.dim_a))
 
         self.R = R_init*torch.eye(self.dim_a)
         self.Q = Q_init*torch.eye(self.dim_z)
@@ -110,6 +111,7 @@ class Kalman_Filter(nn.Module):
             if self.dim_u > 0:
                 B = self.B.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_z, dim_u)
             C = self.C.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_a, dim_z)
+            a_0 = self.a_0.unsqueeze(0).unsqueeze(1).repeat(bs, 1, 1)
         else:
             A = self.A.unsqueeze(0).unsqueeze(1).repeat(bs, sequence_len, 1, 1) # (bs, seq_len, dim_z, dim_z)
             if self.dim_u > 0:
@@ -127,44 +129,46 @@ class Kalman_Filter(nn.Module):
 
         # compute mixture of A and C in case we are use Kalman filter in KVAE
         if self.use_KVAE:
+
             # get alpha
-            alpha = self.dyn_net(a) # (bs, L, K)
+            code_and_abs = torch.cat([a_0, a], dim=1)
+            alpha = self.dyn_net(code_and_abs[:, :-1, :]) # (bs, L, K)
 
             # get mixture of As and Cs
             A = torch.einsum('blk,bklij->blij', alpha, A)
             C = torch.einsum('blk,bklij->blij', alpha, C)
+        
+        if device is not None:
+            self.R = self.R.to(device)
+            self.Q = self.Q.to(device)
 
         # iterate through the length of the sequence
         for t_step in range(sequence_len):
-            
-            # compute mixture of C matrices based on K
 
+            # account for initialization states
+            if t_step == 0:
+                mu_pred = mu
+                sigma_pred = sigma
+            
+            # collect predicted mean and predicted covariance
+            next_means.append(mu_pred)
+            next_covariances.append(sigma_pred)
+            
             # get predicted observation
-            a_pred = torch.matmul(C[:, t_step, :, :], mu.unsqueeze(2)).squeeze(2)
+            a_pred = torch.matmul(C[:, t_step, :, :], mu_pred.unsqueeze(2)).squeeze(2)
 
             # get residual
             r = a[:, t_step, :] - a_pred
 
-            # account for initialization in prediction
-            if len(next_covariances) > 0:
-                mu_pred = next_means[-1]
-                sigma_pred = next_covariances[-1]
-            else:
-                mu_pred = mu
-                sigma_pred = sigma
-
-            # get S matrix
-            if device is not None:
-                self.R = self.R.to(device)
-                self.Q = self.Q.to(device)
+            # get Kalman gain
             S = torch.matmul(torch.matmul(C[:, t_step, :, :], sigma_pred), torch.transpose(C[:, t_step, :, :],1,2)) + self.R
             S_inv = torch.linalg.inv(S)
-
-            # get Kalman gain
             K = torch.matmul(torch.matmul(sigma_pred, torch.transpose(C[:, t_step, :, :],1,2)), S_inv)   
 
-            # update mean and covariance
+            # update mean
             mu = mu_pred + torch.matmul(K, r.unsqueeze(2)).squeeze(2)
+            
+            # update covariance
             KC = torch.matmul(K, C[:, t_step, :, :])
             I = torch.eye(self.dim_z).repeat(bs, 1, 1)
             if device is not None:
@@ -172,16 +176,13 @@ class Kalman_Filter(nn.Module):
             sigma = torch.matmul((I - KC), sigma_pred)
 
             # get predicted mean and covariances
-            mu_pred = torch.matmul(A[:, t_step, :, :], mu.unsqueeze(2)).squeeze(2)
-            sigma_pred = torch.matmul(torch.matmul(A[:, t_step, :, :], sigma), torch.transpose(A[:, t_step, :, :],1,2)) + self.Q
+            if t_step != sequence_len -1:
+                mu_pred = torch.matmul(A[:, t_step+1, :, :], mu.unsqueeze(2)).squeeze(2)
+                sigma_pred = torch.matmul(torch.matmul(A[:, t_step+1, :, :], sigma), torch.transpose(A[:, t_step+1, :, :],1,2)) + self.Q
         
             # collect mean and covariance
             means.append(mu)
             covariances.append(sigma)
-
-            # collect predicted mean and predicted covariance
-            next_means.append(mu_pred)
-            next_covariances.append(sigma_pred)
         
         return mu, sigma, means, covariances, next_means, next_covariances, A, C
 

@@ -60,6 +60,7 @@ class KalmanVAE(nn.Module):
         if dim_u > 0:
             self.B = self.kalman_filter.B
         self.C = self.kalman_filter.C
+        self.a_0 = self.kalman_filter.a_0
 
         # x sample (ground-truth) and a sample
         self.x = None
@@ -67,9 +68,6 @@ class KalmanVAE(nn.Module):
 
         # initialize dynamic parameter network
         self.dynamics_net = self.kalman_filter.dyn_net
-
-        # initialize start code from 
-        self.a_0 = nn.Parameter(torch.zeros(self.dim_a))
 
         # initialize encoder and decoder
         self.encoder = Gaussian_Encoder(channels_in=n_channels_in, 

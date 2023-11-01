@@ -81,9 +81,6 @@ def test_reconstruction(test_loader, kvae, output_folder, args):
     
                     fig.savefig(output_folder + '/reconstruction_{}'.format(str(sample_num+1)))
 
-            # visualize differences in trajectories between sample and reconstruction
-            # TODO
-
         print('Reconstruction Mean-Squared-Error: ', mse_error/len(test_loader))
 
 def test_imputation(test_loader, kvae, mask, output_folder, args):
@@ -106,7 +103,7 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
             zeros_idxs_in_mask = [i for i in range(len(mask)) if mask[i] == 0.]
             if args.masking_fraction > 0.25:
                 n_of_images_to_show = 12
-                idxs_to_show = np.sort(np.random.choice(range(0, len(zeros_idxs_in_mask)+1), size=n_of_images_to_show, replace=False))
+                idxs_to_show = np.sort(np.random.choice(range(0, len(zeros_idxs_in_mask)), size=n_of_images_to_show, replace=False))
             else:
                 n_of_images_to_show = len(zeros_idxs_in_mask)
                 idxs_to_show = [n for n in range(n_of_images_to_show)]
@@ -130,9 +127,49 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
                         axs[1, j].set_xticks([])
                         axs[1, j].set_yticks([])
 
-
                     fig.savefig(output_folder + '/Imputation{}'.format(str(sample_num+1)))
-        
+            
+            # visualize masked and neighbouring frames together
+            idx_to_plot = [zeros_idxs_in_mask[0]]
+            for a, mask_idx in enumerate(zeros_idxs_in_mask):
+                if mask_idx - idx_to_plot[-1] > 0:
+                    idx_to_plot.append(mask_idx)
+                if len(idx_to_plot) == 4:
+                    break
+
+            for n in idx_to_plot:
+                print(mask[n])
+
+            n_of_images_to_show = int(len(idx_to_plot)*3)
+            if i == 1:
+                for sample_num in range(20):
+                    
+                    fig_2, axs_2 = plt.subplots(2, n_of_images_to_show, figsize=(8, 3))
+                    fig_2.suptitle('Ground-Truth - Imputation Comparison ({}%)'.format(int(args.masking_fraction*100)))
+                    
+                    for j, idx in enumerate(idx_to_plot):
+                        t = idx_to_plot[j]
+
+                        ts = [-1, 0, 1]
+                        for k, a in enumerate(range(j*3, (j*3)+3, 1)):
+
+                            axs_2[0, a].set_title('GT, t={}'.format(str(t + ts[k])), fontsize=7)
+                            axs_2[0, a].imshow(sample[sample_num, t + ts[k], 0, :, :]*255, cmap='gray', vmin=0, vmax=255)
+
+                            axs_2[1, a].set_title('IM, t={}'.format(str(t + ts[k])), fontsize=7)
+                            pred_to_plot = imputed_seq[sample_num, t + ts[k], 0, :, :]*255
+                            axs_2[1, a].imshow(pred_to_plot.cpu().numpy(), cmap='gray', vmin=0, vmax=255)
+
+                            axs_2[0, a].grid(False)
+                            axs_2[0, a].set_xticks([])
+                            axs_2[0, a].set_yticks([])
+
+                            axs_2[1, a].grid(False)
+                            axs_2[1, a].set_xticks([])
+                            axs_2[1, a].set_yticks([])
+                    
+                    fig_2.savefig(output_folder + '/Imputation_and_Neighbours{}'.format(str(sample_num+1)))
+
         print('Imputation Mean-Squared-Error: ', mse_error/len(test_loader))
 
 def test_generation(test_loader, kvae, args):
@@ -228,6 +265,7 @@ def main(args):
             # delay training of Dynamics Parameter Network to epoch = n_epoch_initial
             if epoch == n_epoch_initial:
                 optimizer.add_param_group({'params': kvae.dynamics_net.parameters()})
+                optimizer.add_param_group({'params': kvae.a_0})
             
             # train 
             loss_train, loss_dict = train(train_loader, kvae, optimizer, args)
@@ -282,8 +320,7 @@ def main(args):
         for mask_idx in range(len(mask)):
             if mask_idx in to_zero_sorted:
                 mask[mask_idx] = 0
-        print(args.masking_fraction)
-        print(mask)
+
         output_folder = os.path.join(save_filename + '/imputations_{}'.format(str(int(args.masking_fraction*100))))
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
