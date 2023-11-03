@@ -68,7 +68,7 @@ class Kalman_Filter(nn.Module):
             self.C = C_init
 
         if self.use_KVAE:
-            self.dyn_net = Dynamics_Network(self.dim_a, self.K).cuda()
+            self.dyn_net = Dynamics_Network(self.dim_a, self.K)
             self.A = nn.Parameter(self.A.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
             if self.dim_u > 0:
                 self.B = nn.Parameter(self.B.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
@@ -209,12 +209,12 @@ class Kalman_Filter(nn.Module):
         for t_step_reversed in reversed(range(sequence_len-1)):
             
             # get backwards Kalman Gain
-            J = torch.matmul(torch.transpose(A[:, t_step_reversed+1, :, :], 1,2), torch.linalg.inv(next_covariances[t_step_reversed]))
+            J = torch.matmul(torch.transpose(A[:, t_step_reversed+1, :, :], 1,2), torch.linalg.inv(next_covariances[t_step_reversed+1]))
             J = torch.matmul(filtered_covariances[t_step_reversed], J)
 
             # get smoothed mean and covariance
-            mu_t_T = filtered_means[t_step_reversed] + torch.matmul(J, (means[0] - next_means[t_step_reversed]).unsqueeze(2)).squeeze(2)
-            sigma_t_T = filtered_covariances[t_step_reversed] + torch.matmul(torch.matmul(J, covariances[0] - next_covariances[t_step_reversed]), torch.transpose(J, 1,2))
+            mu_t_T = filtered_means[t_step_reversed] + torch.matmul(J, (means[0] - next_means[t_step_reversed+1]).unsqueeze(2)).squeeze(2)
+            sigma_t_T = filtered_covariances[t_step_reversed] + torch.matmul(torch.matmul(J, covariances[0] - next_covariances[t_step_reversed+1]), torch.transpose(J, 1,2))
             
             means.insert(0, mu_t_T)
             covariances.insert(0, sigma_t_T)
