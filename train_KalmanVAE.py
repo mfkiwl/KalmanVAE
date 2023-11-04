@@ -12,7 +12,7 @@ from datetime import datetime
 from dataloaders.bouncing_data import BouncingBallDataLoader
 from torch.utils.data import DataLoader
 
-def train(train_loader, kvae, optimizer, args):
+def train(train_loader, kvae, optimizer, train_dyn_net, args):
 
     loss_epoch = 0.
     idv_losses = {'reconstruction loss': 0,
@@ -21,14 +21,16 @@ def train(train_loader, kvae, optimizer, args):
                   'LGSSM tranisition log likelihood': 0, 
                   'LGSSM tranisition log posterior': 0}
 
+    kvae.train()
+
     for _, sample in enumerate(train_loader, 1):
 
         optimizer.zero_grad()
-        
+
+        sample = sample > 0.5
         sample = sample.cuda().float().to('cuda:' + str(args.device))
 
-        x_hat, A, C = kvae(sample)
-        loss, loss_dict = kvae.calculate_loss(A, C)
+        x_hat, loss, loss_dict = kvae.calculate_loss(sample)
 
         loss.backward()
 
@@ -54,12 +56,13 @@ def test_reconstruction(test_loader, kvae, output_folder, args):
     with torch.no_grad():
         mse_error = 0
         for i, sample in enumerate(test_loader, 1):
-
+            
+            sample = sample > 0.5
             sample = sample.cuda().float().to('cuda:' + str(args.device))
             B, T, C, d1, d2 = sample.size()
 
             # get mean-squared-error on test data
-            x_hat, _, _ = kvae(sample)
+            x_hat = kvae.calculate_loss(sample, recon_only=True)
             x_hat = x_hat.view(B, T, C, d1, d2)
             mse = nn.MSELoss()
             mse_error += mse(x_hat, sample)
@@ -84,11 +87,13 @@ def test_reconstruction(test_loader, kvae, output_folder, args):
         print('Reconstruction Mean-Squared-Error: ', mse_error/len(test_loader))
 
 def test_imputation(test_loader, kvae, mask, output_folder, args):
+    
     kvae.eval()
     with torch.no_grad():
         mse_error = 0
         for i, sample in enumerate(test_loader, 1):
-
+            
+            sample = sample > 0.5
             sample = sample.cuda().float().to('cuda:' + str(args.device))
             B, T, C, d1, d2 = sample.size()
 
@@ -211,12 +216,14 @@ def main(args):
         kvae.load_state_dict(torch.load(args.kvae_model))
 
     if args.train:
+        '''
         # define optimizer
         if args.dim_u == 0:
             params = [kvae.A, kvae.C] + list(kvae.encoder.parameters()) + list(kvae.decoder.parameters())
         else:
             params = [kvae.A, kvae.B, kvae.C] + list(kvae.encoder.parameters()) + list(kvae.decoder.parameters())
-        optimizer = torch.optim.Adam(params, lr=args.lr)
+        '''
+        optimizer = torch.optim.Adam(kvae.parameters(), lr=args.lr)
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma = args.gamma_lr_schedule)
 
         # helper variables
@@ -259,16 +266,20 @@ def main(args):
         # 2. include training with masking
     
         # define number of epochs when NOT to train Dynamic Parameter Network
-        n_epoch_initial = 1
+        n_epoch_initial = 15
+        train_dyn_net = False
         for epoch in range(args.num_epochs):
             
             # delay training of Dynamics Parameter Network to epoch = n_epoch_initial
-            if epoch == n_epoch_initial:
+            if epoch >= n_epoch_initial:
+                train_dyn_net = True
+                '''
                 optimizer.add_param_group({'params': kvae.dynamics_net.parameters()})
-                optimizer.add_param_group({'params': kvae.a_0})
-            
+                optimizer.add_param_group({'params': kvae.start_code})
+                '''
+
             # train 
-            loss_train, loss_dict = train(train_loader, kvae, optimizer, args)
+            loss_train, loss_dict = train(train_loader, kvae, optimizer, train_dyn_net, args)
             if args.use_wandb:
                 run.log(loss_dict)
             if epoch % 20 == 0 and epoch > 0:
@@ -289,19 +300,6 @@ def main(args):
                 log_file.writelines(log_list)
                 log_list.clear()
     
-    # testing:
-    # TODO:
-    # 1. Test reconstruction
-    #    - visual comparison (for both frames and whole trajectory)
-    #    - compute MSE error for cross-model and cross-mode comparison
-    # 2. Test long term generation 
-    #    - visual comparison with different numbers of starting frames
-    # 3. Test frame imputation
-    #    - visual comparison for both random and consecutive frame omission
-    #      including both initial and final frames + mse error comparison 
-    #      with reconstruction results (here set benchmark for empy frame)
-    # 4. Reproduce results for Dyanmic Parameter Network
-    #    - visual comparison of the the different K=3 dynamics
     if args.test:
         
         if not args.train:

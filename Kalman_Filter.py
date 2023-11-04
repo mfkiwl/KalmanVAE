@@ -7,24 +7,30 @@ class Dynamics_Network(nn.Module):
     def __init__(self,
                  dim_a,
                  dim_hidden,
+                 K,
                  num_layers=2):
         
         super(Dynamics_Network, self).__init__()
 
         self.dim_a = dim_a
         self.dim_hidden = dim_hidden
+        self.K = K
         self.num_layers = num_layers
 
-        self.dynamics_net = nn.LSTM(self.dim_a, 
-                                    self.dim_hidden, 
-                                    self.num_layers, 
-                                    batch_first=True)
+        self.lstm = nn.LSTM(self.dim_a, 
+                            self.dim_hidden, 
+                            self.num_layers, 
+                            batch_first=True)
         
-    def forward(self, a):
-        weights, _ = self.dynamics_net(a)
-        weights = F.softmax(weights, dim=-1)
+        self.linear = nn.Linear(self.dim_hidden, self.K)
 
-        return weights
+        
+    def forward(self, input):
+        input, _ = self.lstm(input)
+        input = self.linear(input)
+        input = F.softmax(input, dim=-1)
+
+        return input
     
 
 class Kalman_Filter(nn.Module):
@@ -56,7 +62,6 @@ class Kalman_Filter(nn.Module):
             self.A = torch.eye(self.dim_z)
         else:
             self.A = A_init
-        
         if self.dim_u > 0:
             if isinstance(B_init, int):
                 self.B = torch.eye(self.dim_z, self.dim_u)
@@ -68,7 +73,7 @@ class Kalman_Filter(nn.Module):
             self.C = C_init
 
         if self.use_KVAE:
-            self.dyn_net = Dynamics_Network(self.dim_a, self.K)
+            self.dyn_net = Dynamics_Network(self.dim_a, 128, self.K)
             self.A = nn.Parameter(self.A.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
             if self.dim_u > 0:
                 self.B = nn.Parameter(self.B.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
@@ -87,7 +92,7 @@ class Kalman_Filter(nn.Module):
         else:
             self.sigma = sigma_init
 
-    def filter(self, a, device=None):
+    def filter(self, a, train_dyn_net=True, device=None):
 
         '''
         This method carries out Kalman filtering based 
@@ -132,7 +137,10 @@ class Kalman_Filter(nn.Module):
 
             # get alpha
             code_and_abs = torch.cat([a_0, a], dim=1)
-            alpha = self.dyn_net(code_and_abs[:, :-1, :]) # (bs, L, K)
+            if train_dyn_net:
+                alpha = self.dyn_net(code_and_abs[:, :-1, :]) # (bs, L, K)
+            else:
+                alpha = self.dyn_net(code_and_abs[:, :-1, :]).detach() # (bs, L, K)
 
             # get mixture of As and Cs
             A = torch.einsum('blk,bklij->blij', alpha, A)
