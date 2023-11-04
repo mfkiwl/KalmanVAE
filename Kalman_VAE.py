@@ -143,8 +143,7 @@ class KalmanVAE(nn.Module):
 
         return x_hat, alpha, -self.recon_scale*(log_p_x_given_a) + log_q_a_given_x + log_p_z_given_a - log_p_a_given_z - log_p_zT_given_zt - log_p_z0, loss_dict
 
-
-    def impute(self, x, mask):
+    def impute(self, x, mask, sample=False):
 
         # get dims
         bs = x.size(0)
@@ -160,7 +159,10 @@ class KalmanVAE(nn.Module):
         a_mean, a_std = self.encoder(x_masked.view(-1,*x_masked.shape[2:]))
 
         # sample from q_{phi} (a|x)
-        a_sample = (a_mean + a_std*torch.normal(mean=torch.zeros_like(a_mean))).view(bs, seq_len, self.dim_a)
+        if sample:
+            a_sample = (a_mean + a_std*torch.normal(mean=torch.zeros_like(a_mean))).view(bs, seq_len, self.dim_a)
+        else:
+            a_sample = a_mean.view(bs, seq_len, self.dim_a)
 
         # estimate observation from filtered posterior
         for t, mask_el in enumerate(mask):
@@ -168,7 +170,7 @@ class KalmanVAE(nn.Module):
                 continue
             else:
                 # get filtered distribution up to t=t-1
-                _, _, _, _, next_means, _, A, C, alpha = self.kalman_filter.filter(a_sample, device=x.get_device())
+                _, _, _, _, next_means, _, A, C, alpha = self.kalman_filter.filter(a_sample, imputation_idx=t+1, device=x.get_device())
                 a_sample[:, t, :] = torch.matmul(C[:, t, :, :], torch.cat(next_means).view(-1, seq_len, self.dim_z)[:, t, :].unsqueeze(-1)).squeeze(-1)
         
         # get filtered+smoothed distribution and smoothed observations

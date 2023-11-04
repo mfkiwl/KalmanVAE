@@ -55,6 +55,7 @@ class Kalman_Filter(nn.Module):
         self.dim_a = dim_a
         self.dim_u = dim_u
         self.K = K
+        self.T = T
         self.use_KVAE = use_KVAE
 
         if isinstance(A_init, int):
@@ -91,7 +92,7 @@ class Kalman_Filter(nn.Module):
         else:
             self.sigma = sigma_init
 
-    def filter(self, a, train_dyn_net=True, device=None):
+    def filter(self, a, train_dyn_net=True, imputation_idx=None, device=None):
 
         '''
         This method carries out Kalman filtering based 
@@ -136,10 +137,16 @@ class Kalman_Filter(nn.Module):
 
             # get alpha
             code_and_abs = torch.cat([a_0, a], dim=1)
+            if imputation_idx is not None:
+                code_and_abs = code_and_abs[:, :imputation_idx+1, :]
             if train_dyn_net:
                 alpha = self.dyn_net(code_and_abs[:, :-1, :]) # (bs, L, K)
             else:
                 alpha = self.dyn_net(code_and_abs[:, :-1, :]).detach() # (bs, L, K)
+
+            if imputation_idx is not None:
+                to_concat = torch.zeros(bs, self.T-imputation_idx, self.K).to(device)
+                alpha = torch.cat([alpha, to_concat], dim=1)
 
             # get mixture of As and Cs
             A = torch.einsum('blk,bklij->blij', alpha, A)
@@ -154,8 +161,11 @@ class Kalman_Filter(nn.Module):
 
             # account for initialization states
             if t_step == 0:
-                mu_pred = mu
-                sigma_pred = sigma
+                mu_pred = torch.matmul(A[:, t_step, :, :], mu.unsqueeze(2)).squeeze(2)
+                sigma_pred = torch.matmul(torch.matmul(A[:, t_step, :, :], sigma), torch.transpose(A[:, t_step, :, :],1,2)) + self.Q
+                
+                # mu_pred = mu
+                # sigma_pred = sigma
             
             # collect predicted mean and predicted covariance
             next_means.append(mu_pred)
