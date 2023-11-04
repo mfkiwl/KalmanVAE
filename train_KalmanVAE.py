@@ -152,9 +152,6 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
                 if len(idx_to_plot) == 4:
                     break
 
-            for n in idx_to_plot:
-                print(mask[n])
-
             n_of_images_to_show = int(len(idx_to_plot)*3)
             if i == 1:
                 for sample_num in range(20):
@@ -187,9 +184,51 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
 
         print('Imputation Mean-Squared-Error: ', mse_error/len(test_loader))
 
-def test_generation(test_loader, kvae, args):
-    pass
+def test_generation(test_loader, mask, kvae, output_folder, args):
+    kvae.eval()
+    with torch.no_grad():
 
+        mse_error = 0
+        for i, sample in enumerate(test_loader, 1):
+            
+            sample = sample > 0.5
+            sample = sample.cuda().float().to('cuda:' + str(args.device))
+
+            # get imputations
+            generated_seq = kvae.generate(sample, mask)
+            mse = nn.MSELoss()
+            mse_error += mse(generated_seq, sample)
+
+            # revert sample to showable format
+            sample = sample.cpu().numpy()
+
+            # get samples to show
+            zeros_idxs_in_mask = [i for i in range(len(mask)) if mask[i] == 0.]
+            n_of_images_to_show = 12
+            # idxs_to_show = np.sort(np.random.choice(range(0, len(zeros_idxs_in_mask)), size=n_of_images_to_show, replace=False))
+            idxs_to_show = np.arange(0, n_of_images_to_show)
+            
+            if i == 1:
+                for sample_num in range(20):
+                    fig, axs = plt.subplots(2, n_of_images_to_show, figsize=(8, 3))
+                    fig.suptitle('Ground-Truth - Generation Comparison')
+                    for j, idx in enumerate(idxs_to_show):
+                        t = zeros_idxs_in_mask[idx]
+                        axs[0, j].set_title('GT, t={}'.format(str(t)), fontsize=7)
+                        axs[0, j].imshow(sample[sample_num, t, 0, :, :]*255, cmap='gray', vmin=0, vmax=255)
+                        axs[1, j].set_title('GN t={}'.format(str(t)), fontsize=7)
+                        pred_to_plot = generated_seq[sample_num, t, 0, :, :]*255
+                        axs[1, j].imshow(pred_to_plot.cpu().numpy(), cmap='gray', vmin=0, vmax=255)
+                        axs[0, j].grid(False)
+                        axs[0, j].set_xticks([])
+                        axs[0, j].set_yticks([])
+                        axs[1, j].grid(False)
+                        axs[1, j].set_xticks([])
+                        axs[1, j].set_yticks([])
+
+                    fig.savefig(output_folder + '/Generation{}'.format(str(sample_num+1)))
+
+        print('Generation Mean-Squared-Error: ', mse_error/len(test_loader))
 
 def main(args):
 
@@ -326,16 +365,20 @@ def main(args):
         for mask_idx in range(len(mask)):
             if mask_idx in to_zero_sorted:
                 mask[mask_idx] = 0
-
         output_folder = os.path.join(save_filename, '', 'imputations_{}'.format(str(int(args.masking_fraction*100))))
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
         test_imputation(test_loader, kvae, mask, output_folder, args)
-
+        
+        mask = [1] * args.n_of_frame_to_generate
+        to_zero = np.arange(8, args.n_of_frame_to_generate)
+        for mask_idx in range(len(mask)):
+            if mask_idx in to_zero:
+                mask[mask_idx] = 0
         output_folder = os.path.join(save_filename, '', 'generations')
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
-        test_generation(test_loader, kvae, args)
+        test_generation(test_loader, mask, kvae, output_folder, args)
 
 
 if __name__ == '__main__':
@@ -393,6 +436,8 @@ if __name__ == '__main__':
         help='test model')
     parser.add_argument('--masking_fraction', type=float, default=0.3, 
         help='fraction fo sample being masked for testing imputation')
+    parser.add_argument('--n_of_frame_to_generate', type=int, default=100, 
+        help='number of sample we want to generate')
 
     # logistics
     parser.add_argument('--datasets_root_dir', type=str, default="/data2/users/lr4617/data/",

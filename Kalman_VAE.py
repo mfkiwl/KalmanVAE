@@ -185,5 +185,50 @@ class KalmanVAE(nn.Module):
         else:
             imputed_data, _ = self.decoder(smoothed_obs.view(bs*seq_len, -1))
 
-        return imputed_data.view(bs, seq_len, *x.shape[2:])        
+        return imputed_data.view(bs, seq_len, *x.shape[2:])   
+
+    def generate(self, x, mask, sample=False):  
+
+        # get dims
+        bs = x.size(0)
+
+        # convert mask to torch tensor
+        mask_t = torch.Tensor(mask).unsqueeze(0).unsqueeze(2).unsqueeze(3).unsqueeze(4).repeat(bs, 1, 1, x.size(3), x.size(4)).to(x.get_device()) 
+
+        # mask input
+        x_masked = mask_t*x
+
+        # feed masked sample in encoder
+        a_mean, a_std = self.encoder(x_masked.view(-1,*x_masked.shape[2:]))
+
+        # sample from q_{phi} (a|x)
+        if sample:
+            a_sample = (a_mean + a_std*torch.normal(mean=torch.zeros_like(a_mean))).view(bs, len(mask), self.dim_a)
+        else:
+            a_sample = a_mean.view(bs, len(mask), self.dim_a)
         
+        # estimate observation from filtered posterior
+        for t, mask_el in enumerate(mask):
+            if mask_el != 0:
+                continue
+            else:
+                # get filtered distribution up to t=t-1
+                if t>=self.T:
+                    start_idx = t-self.T + 1
+                    end_idx = t+1
+                    C_idx = -1
+                else:
+                    start_idx = 0
+                    end_idx = self.T
+                    C_idx = t
+                _, _, _, _, next_means, _, A, C, alpha = self.kalman_filter.filter(a_sample[:, start_idx:end_idx, :], imputation_idx=t+1, device=x.get_device())
+                a_sample[:, t, :] = torch.matmul(C[:, C_idx, :, :], torch.cat(next_means).view(-1, len(mask), self.dim_z)[:, C_idx, :].unsqueeze(-1)).squeeze(-1)
+
+        # decode predicted observations
+        if self.use_bernoulli:
+            x_dist = self.decoder(a_sample.view(bs*len(mask), -1))
+            generated_data = x_dist.mean
+        else:
+            generated_data, _ = self.decoder(a_sample.view(bs*len(mask), -1))
+
+        return generated_data.view(bs, len(mask), *x.shape[2:])   
