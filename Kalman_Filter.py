@@ -24,7 +24,6 @@ class Dynamics_Network(nn.Module):
         
         self.linear = nn.Linear(self.dim_hidden, self.K)
 
-        
     def forward(self, input):
         input, _ = self.lstm(input)
         input = self.linear(input)
@@ -192,7 +191,7 @@ class Kalman_Filter(nn.Module):
             means.append(mu)
             covariances.append(sigma)
         
-        return mu, sigma, means, covariances, next_means, next_covariances, A, C
+        return mu, sigma, means, covariances, next_means, next_covariances, A, C, alpha
 
     def smooth(self, a, params):
 
@@ -207,7 +206,7 @@ class Kalman_Filter(nn.Module):
         bs, sequence_len = a.size(0), a.size(1)
 
         # get filtered mean and covariances for initialization of Kalman smoother
-        _, _, filtered_means, filtered_covariances, next_means, next_covariances, A, _ = params
+        _, _, filtered_means, filtered_covariances, next_means, next_covariances, A, _, alpha = params
 
         # collect smoothed means and covariance
         means = [filtered_means[-1]]

@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.distributions.multivariate_normal import MultivariateNormal
 
 from Kalman_Filter import Kalman_Filter
-from utils import Gaussian_Encoder, Gaussian_Decoder, log_likelihood
+from utils import Gaussian_Encoder, Gaussian_Decoder, Bernoulli_Decoder, log_likelihood
 
 class KalmanVAE(nn.Module):
     
@@ -14,9 +14,10 @@ class KalmanVAE(nn.Module):
                  dim_z, 
                  K, 
                  T, 
-                 recon_scale=0.6,
+                 recon_scale=0.3,
                  dim_u=0, 
-                 x_var=0.01):
+                 x_var=0.01, 
+                 use_bernoulli=False):
         
         super(KalmanVAE, self).__init__()
         
@@ -39,12 +40,18 @@ class KalmanVAE(nn.Module):
         self.n_channels_in = n_channels_in
         self.recon_scale = recon_scale
         self.x_var = torch.tensor(x_var)
+        self.use_bernoulli = use_bernoulli
 
         # initialize encoder and decoder
         self.encoder = Gaussian_Encoder(channels_in=n_channels_in, 
                                         image_size=image_size, 
                                         latent_dim=self.dim_a)
-        self.decoder = Gaussian_Decoder(channels_in=n_channels_in, 
+        if use_bernoulli:
+            self.decoder = Bernoulli_Decoder(channels_in=n_channels_in, 
+                                            image_size=image_size, 
+                                            latent_dim=self.dim_a)
+        else:
+            self.decoder = Gaussian_Decoder(channels_in=n_channels_in, 
                                         image_size=image_size, 
                                         latent_dim=self.dim_a,
                                         out_var=self.x_var)
@@ -66,7 +73,11 @@ class KalmanVAE(nn.Module):
         a_std = a_std.view(batch_size, seq_len, self.dim_a)
 
         # get reconstruction i.e. get p_{theta} (x|a)
-        x_hat, x_mean = self.decoder(a_sample)
+        if self.use_bernoulli:
+            x_dist = self.decoder(a_sample.view(-1, self.dim_a))
+            x_hat = x_dist.mean
+        else:
+            x_hat, x_mean = self.decoder(a_sample)
 
         if recon_only:
             return x_hat
@@ -74,15 +85,18 @@ class KalmanVAE(nn.Module):
         #### LGSSM - part
         # get smoothing Distribution: p_{gamma} (z|a) 
         params = self.kalman_filter.filter(a_sample, train_dyn_net, device=x.get_device())
-        _, _, _, _, _, _, A, C = params
+        _, _, _, _, _, _, A, C, alpha = params
         smoothed_means, smoothed_covariances = self.kalman_filter.smooth(a_sample, params)
 
         #### VAE - part
         #### p_{theta} (x|a)
-        log_p_x_given_a = log_likelihood(x.view(x.size(0)*x.size(1), -1),
-                                         x_mean.view(x.size(0)*x.size(1), -1),
-                                         self.x_var, 
-                                         device=x.get_device()).mean(1).sum()
+        if self.use_bernoulli:
+            log_p_x_given_a = x_dist.log_prob(x.reshape(-1, *x.shape[2:])).sum(0).mean(0).sum()
+        else:
+            log_p_x_given_a = log_likelihood(x.view(x.size(0)*x.size(1), -1),
+                                            x_mean.view(x.size(0)*x.size(1), -1),
+                                            self.x_var, 
+                                            device=x.get_device()).mean(1).sum()
         '''
         self.x_dist = MultivariateNormal(loc=self.x_mean.view(self.x.size(0)*self.x.size(1), -1), 
                                          covariance_matrix=(torch.eye(self.x.size(-1)**2)*self.x_var).to(self.x.get_device()))
@@ -91,7 +105,7 @@ class KalmanVAE(nn.Module):
         
         #### q_{phi} (a|x)
         a_dist = MultivariateNormal(loc=a_mean,   
-                                         covariance_matrix=torch.diag_embed(a_std))
+                                    covariance_matrix=torch.diag_embed(a_std))
         log_q_a_given_x = a_dist.log_prob(a_sample).mean(1).sum()
 
 
@@ -127,7 +141,7 @@ class KalmanVAE(nn.Module):
                      'LGSSM tranisition log likelihood': log_p_zT_given_zt.detach().cpu().numpy(), 
                      'LGSSM tranisition log posterior': log_p_z_given_a.detach().cpu().numpy()}
 
-        return x_hat, -self.recon_scale*(log_p_x_given_a) + log_q_a_given_x + log_p_z_given_a - log_p_a_given_z - log_p_zT_given_zt - log_p_z0, loss_dict
+        return x_hat, alpha, -self.recon_scale*(log_p_x_given_a) + log_q_a_given_x + log_p_z_given_a - log_p_a_given_z - log_p_zT_given_zt - log_p_z0, loss_dict
 
 
     def impute(self, x, mask):
@@ -154,7 +168,7 @@ class KalmanVAE(nn.Module):
                 continue
             else:
                 # get filtered distribution up to t=t-1
-                _, _, _, _, next_means, _, A, C = self.kalman_filter.filter(a_sample, device=x.get_device())
+                _, _, _, _, next_means, _, A, C, alpha = self.kalman_filter.filter(a_sample, device=x.get_device())
                 a_sample[:, t, :] = torch.matmul(C[:, t, :, :], torch.cat(next_means).view(-1, seq_len, self.dim_z)[:, t, :].unsqueeze(-1)).squeeze(-1)
         
         # get filtered+smoothed distribution and smoothed observations
@@ -163,7 +177,11 @@ class KalmanVAE(nn.Module):
         smoothed_obs = torch.matmul(C, torch.cat(smoothed_means).view(-1, seq_len, self.dim_z).unsqueeze(-1)).squeeze(1)
 
         # decode smoothed observations
-        imputed_data, _ = self.decoder(smoothed_obs.view(bs*seq_len, -1))
+        if self.use_bernoulli:
+            x_dist = self.decoder(smoothed_obs.view(bs*seq_len, -1))
+            imputed_data = x_dist.mean
+        else:
+            imputed_data, _ = self.decoder(smoothed_obs.view(bs*seq_len, -1))
 
         return imputed_data.view(bs, seq_len, *x.shape[2:])        
         

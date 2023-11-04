@@ -12,6 +12,19 @@ from datetime import datetime
 from dataloaders.bouncing_data import BouncingBallDataLoader
 from torch.utils.data import DataLoader
 
+def plot_dynamics(alphas, output_folder, n_samples=20):
+    for n_sample in range(n_samples):
+        sample_dyn = alphas[n_sample, :, :]
+        fig, axs = plt.subplots(nrows=3, ncols=1, figsize=(10, 6))
+        bar_colors = ['tab:blue', 'tab:red', 'tab:orange']
+
+        for k in range(args.K):
+            axs[k].bar(np.arange(sample_dyn.size(0)), sample_dyn[:, k], color=bar_colors[k])
+            axs[k].set_ylabel('K-value')
+            axs[k].set_xlabel('Time-Step')
+
+        fig.savefig(output_folder + 'dyn_bars_{}.png'.format(n_sample))
+
 def train(train_loader, kvae, optimizer, train_dyn_net, args):
 
     loss_epoch = 0.
@@ -20,35 +33,32 @@ def train(train_loader, kvae, optimizer, train_dyn_net, args):
                   'LGSSM observation log likelihood': 0,
                   'LGSSM tranisition log likelihood': 0, 
                   'LGSSM tranisition log posterior': 0}
-
+    
     kvae.train()
 
-    for _, sample in enumerate(train_loader, 1):
+    for n, sample in enumerate(train_loader, 1):
 
         optimizer.zero_grad()
 
         sample = sample > 0.5
         sample = sample.cuda().float().to('cuda:' + str(args.device))
 
-        x_hat, loss, loss_dict = kvae.calculate_loss(sample)
+        _, alpha, loss, loss_dict = kvae.calculate_loss(sample, train_dyn_net)
 
         loss.backward()
-
         optimizer.step()
-
-        # TODO: add option to train with masking
-        # TODO: add calculation of MSE
-        # TODO: add gradient clipping
 
         loss_epoch += loss
 
         for key in idv_losses.keys():
             idv_losses[key] += loss_dict[key]
-    
+
+        alphas = alpha.cpu()
+
     for key in idv_losses.keys():
         idv_losses[key] = idv_losses[key]/len(train_loader)
-
-    return loss_epoch/len(train_loader), idv_losses
+    
+    return loss_epoch/len(train_loader), idv_losses, alphas
 
 def test_reconstruction(test_loader, kvae, output_folder, args):
 
@@ -179,7 +189,7 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
 
 def test_generation(test_loader, kvae, args):
     pass
-    
+
 
 def main(args):
 
@@ -201,6 +211,7 @@ def main(args):
     it = iter(train_loader)
     first = next(it)
     _, T, n_channels_in, dim, dim = first.size()
+    args.T = T
 
     # load model
     kvae = KalmanVAE(n_channels_in,
@@ -209,20 +220,14 @@ def main(args):
                      args.dim_z, 
                      args.K, 
                      T=T, 
-                     recon_scale=args.recon_scale).cuda().to('cuda:' + str(args.device))
+                     recon_scale=args.recon_scale,
+                     use_bernoulli=args.use_bernoulli).cuda().to('cuda:' + str(args.device))
     
     # if already trained, load checkpoints
     if args.kvae_model is not None:
         kvae.load_state_dict(torch.load(args.kvae_model))
 
     if args.train:
-        '''
-        # define optimizer
-        if args.dim_u == 0:
-            params = [kvae.A, kvae.C] + list(kvae.encoder.parameters()) + list(kvae.decoder.parameters())
-        else:
-            params = [kvae.A, kvae.B, kvae.C] + list(kvae.encoder.parameters()) + list(kvae.decoder.parameters())
-        '''
         optimizer = torch.optim.Adam(kvae.parameters(), lr=args.lr)
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma = args.gamma_lr_schedule)
 
@@ -259,27 +264,19 @@ def main(args):
                                     "number-of-dynamics-K": args.K,
                                     "reconstruction-weight": args.recon_scale},
                             name=run_name)
-
-        # training 
-        # TODO: 
-        # 1. include validation
-        # 2. include training with masking
     
         # define number of epochs when NOT to train Dynamic Parameter Network
-        n_epoch_initial = 15
+        n_epoch_initial = 20
         train_dyn_net = False
+
         for epoch in range(args.num_epochs):
             
             # delay training of Dynamics Parameter Network to epoch = n_epoch_initial
             if epoch >= n_epoch_initial:
                 train_dyn_net = True
-                '''
-                optimizer.add_param_group({'params': kvae.dynamics_net.parameters()})
-                optimizer.add_param_group({'params': kvae.start_code})
-                '''
 
             # train 
-            loss_train, loss_dict = train(train_loader, kvae, optimizer, train_dyn_net, args)
+            loss_train, loss_dict, alphas = train(train_loader, kvae, optimizer, train_dyn_net, args)
             if args.use_wandb:
                 run.log(loss_dict)
             if epoch % 20 == 0 and epoch > 0:
@@ -289,6 +286,18 @@ def main(args):
             start = end
             print(log)
             log_list.append(log + '\n')
+
+            # visualize dynamics during training
+            output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'epoch_{}'.format(str(epoch)))
+            if not os.path.isdir(output_folder):
+                os.makedirs(output_folder)
+            # plot_dynamics(alphas, output_folder)
+            
+            # valid reconstruction 
+            output_folder = os.path.join(save_filename, '', 'validation', '', 'epoch_{}'.format(str(epoch)))
+            if not os.path.exists('{}'.format(output_folder)):
+                os.makedirs(output_folder)
+            test_reconstruction(test_loader, kvae, output_folder, args)
 
             # save checkpoints 
             if epoch % 10 == 0 or epoch == args.num_epochs-1:
@@ -301,16 +310,15 @@ def main(args):
                 log_list.clear()
     
     if args.test:
-        
+
         if not args.train:
             path_to_dir = args.kvae_model.split('/')[:-1]
             save_filename = "/".join(path_to_dir) 
         
-        output_folder = os.path.join(save_filename + '/reconstructions')
+        output_folder = os.path.join(save_filename, '', 'reconstructions')
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
         test_reconstruction(test_loader, kvae, output_folder, args)
-
         
         mask = [1] * T
         n_of_samples_to_mask = int((T - 8)*args.masking_fraction)
@@ -319,12 +327,12 @@ def main(args):
             if mask_idx in to_zero_sorted:
                 mask[mask_idx] = 0
 
-        output_folder = os.path.join(save_filename + '/imputations_{}'.format(str(int(args.masking_fraction*100))))
+        output_folder = os.path.join(save_filename, '', 'imputations_{}'.format(str(int(args.masking_fraction*100))))
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
         test_imputation(test_loader, kvae, mask, output_folder, args)
 
-        output_folder = os.path.join(save_filename + '/generations')
+        output_folder = os.path.join(save_filename, '', 'generations')
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
         test_generation(test_loader, kvae, args)
@@ -354,6 +362,9 @@ if __name__ == '__main__':
         help='dimensionality of encoded vector u')
     parser.add_argument('--K', type=int, default=3,
         help='number of LGSSMs to be mixed')
+    parser.add_argument('--T', type=int, default=50,
+        help='number of timestep in the dataset')
+    
 
     # training parameters
     parser.add_argument('--train', type=int, default=None,
@@ -372,6 +383,10 @@ if __name__ == '__main__':
         help="learning rate decay multiplicative factor")
     parser.add_argument('--recon_scale', type=float, default=0.3, 
         help="importance given to reconstruction during training")
+    parser.add_argument('--use_bernoulli', type=int, default=0,
+        help='use bernoulli in the decoder')
+    parser.add_argument('--n_epoch_initial', type=int, default=20,
+        help='number of epochs to wait for to train dynamics parameter')
     
     # testing parameters
     parser.add_argument('--test', type=int, default=None,
