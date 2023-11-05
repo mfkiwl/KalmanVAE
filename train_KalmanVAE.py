@@ -108,7 +108,7 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
             B, T, C, d1, d2 = sample.size()
 
             # get imputations
-            imputed_seq = kvae.impute(sample, mask)
+            imputed_seq, _ = kvae.impute(sample, mask)
             mse = nn.MSELoss()
             mse_error += mse(imputed_seq, sample)
 
@@ -144,6 +144,7 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
 
                     fig.savefig(output_folder + '/Imputation{}'.format(str(sample_num+1)))
             
+            '''
             # visualize masked and neighbouring frames together
             idx_to_plot = [zeros_idxs_in_mask[0]]
             for a, mask_idx in enumerate(zeros_idxs_in_mask):
@@ -181,7 +182,7 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
                             axs_2[1, a].set_yticks([])
                     
                     fig_2.savefig(output_folder + '/Imputation_and_Neighbours{}'.format(str(sample_num+1)))
-
+            '''
         print('Imputation Mean-Squared-Error: ', mse_error/len(test_loader))
 
 def test_generation(test_loader, mask, kvae, output_folder, args):
@@ -204,8 +205,8 @@ def test_generation(test_loader, mask, kvae, output_folder, args):
 
             # get samples to show
             zeros_idxs_in_mask = [i for i in range(len(mask)) if mask[i] == 0.]
+            print(zeros_idxs_in_mask)
             n_of_images_to_show = 12
-            # idxs_to_show = np.sort(np.random.choice(range(0, len(zeros_idxs_in_mask)), size=n_of_images_to_show, replace=False))
             idxs_to_show = np.arange(0, n_of_images_to_show)
             
             if i == 1:
@@ -229,6 +230,49 @@ def test_generation(test_loader, mask, kvae, output_folder, args):
                     fig.savefig(output_folder + '/Generation{}'.format(str(sample_num+1)))
 
         print('Generation Mean-Squared-Error: ', mse_error/len(test_loader))
+
+def plot_imputation(test_dl, kvae, mask, output_folder, args):
+
+    # show 20 sequences
+    for sample_n in range(20):
+
+        sample = test_dl[sample_n]
+        sample = sample > 0.5
+        batched_sample = torch.Tensor(sample).unsqueeze(0).to('cuda:0')
+
+        # get imputations
+        imputed_seq, alpha = kvae.impute(batched_sample, mask)
+
+        wieghts_dir = os.path.join(output_folder, '', 'sample_{}'.format(sample_n), '', 'weights')
+        if not os.path.isdir(wieghts_dir):
+            os.makedirs(wieghts_dir)
+
+        for step, (image, reconstruction, weight) in enumerate(zip(batched_sample.squeeze(0).cpu(), imputed_seq.detach().cpu().squeeze(0).numpy(), alpha.squeeze(0))):
+            
+            image = image > 0.5
+            fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(10, 5))
+            fig.suptitle(f"$t = {step}$")
+
+            axes[0].imshow(image[0], vmin=0, vmax=1, cmap="Greys", aspect='equal')
+            axes[0].set_adjustable('box') 
+            axes[1].imshow(reconstruction[0], vmin=0, vmax=1, cmap="Greys", aspect='equal')
+            axes[2].bar(["0", "1", "2"], weight.detach().cpu().numpy())
+            axes[2].set_ylim(0, 1)
+            axes[0].set_title(r"image $\mathbf{x}_t$")
+            axes[1].set_title(r"reconstruction $\hat{\mathbf{x}}_t$")
+            axes[2].set_title(r"weight $\mathbf{k}_t$")
+            pos_img = axes[0].get_position()
+            pos_bar = axes[2].get_position()
+            axes[2].set_position([pos_bar.x0, pos_img.y0, pos_bar.width, pos_img.height])
+            
+            fig.savefig(os.path.join(wieghts_dir, 'weight-{}.png'.format(step)))
+            plt.close()
+
+            '''
+            fig_gt = plt.figure()
+            plt.imshow(image[0], vmin=0, vmax=1, cmap="Greys", aspect='equal')
+            fig.savefig(os.path.join(wieghts_dir, 'weight-{}.png'.format(step)))
+            '''
 
 def main(args):
 
@@ -326,12 +370,6 @@ def main(args):
             print(log)
             log_list.append(log + '\n')
 
-            # visualize dynamics during training
-            output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'epoch_{}'.format(str(epoch)))
-            if not os.path.isdir(output_folder):
-                os.makedirs(output_folder)
-            # plot_dynamics(alphas, output_folder)
-            
             # valid reconstruction 
             output_folder = os.path.join(save_filename, '', 'validation', '', 'epoch_{}'.format(str(epoch)))
             if not os.path.exists('{}'.format(output_folder)):
@@ -349,27 +387,36 @@ def main(args):
                 log_list.clear()
     
     if args.test:
-
+        
+        #### GET FILENAME
         if not args.train:
             path_to_dir = args.kvae_model.split('/')[:-1]
             save_filename = "/".join(path_to_dir) 
         
+        #### RECONSTRUCTION
         output_folder = os.path.join(save_filename, '', 'reconstructions')
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
         test_reconstruction(test_loader, kvae, output_folder, args)
         
+        #### IMPUTATION
         mask = [1] * T
         n_of_samples_to_mask = int((T - 8)*args.masking_fraction)
-        to_zero_sorted = random.sample(range(4, T-4), n_of_samples_to_mask)
+        to_zero = random.sample(range(4, T-4), n_of_samples_to_mask)
         for mask_idx in range(len(mask)):
-            if mask_idx in to_zero_sorted:
+            if mask_idx in to_zero:
                 mask[mask_idx] = 0
         output_folder = os.path.join(save_filename, '', 'imputations_{}'.format(str(int(args.masking_fraction*100))))
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
-        test_imputation(test_loader, kvae, mask, output_folder, args)
+        # test_imputation(test_loader, kvae, mask, output_folder, args)
+
+        output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'mask_{}'.format(int(args.masking_fraction*100)))
+        if not os.path.isdir(output_folder):
+            os.makedirs(output_folder)
+        plot_imputation(test_dl, kvae, mask, output_folder, args)
         
+        #### GENERATION
         mask = [1] * args.n_of_frame_to_generate
         to_zero = np.arange(8, args.n_of_frame_to_generate)
         for mask_idx in range(len(mask)):
@@ -378,7 +425,7 @@ def main(args):
         output_folder = os.path.join(save_filename, '', 'generations')
         if not os.path.exists('{}'.format(output_folder)):
             os.makedirs(output_folder)
-        test_generation(test_loader, mask, kvae, output_folder, args)
+        # test_generation(test_loader, mask, kvae, output_folder, args)
 
 
 if __name__ == '__main__':
@@ -407,7 +454,6 @@ if __name__ == '__main__':
         help='number of LGSSMs to be mixed')
     parser.add_argument('--T', type=int, default=50,
         help='number of timestep in the dataset')
-    
 
     # training parameters
     parser.add_argument('--train', type=int, default=None,

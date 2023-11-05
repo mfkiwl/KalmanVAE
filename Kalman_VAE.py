@@ -175,6 +175,7 @@ class KalmanVAE(nn.Module):
         
         # get filtered+smoothed distribution and smoothed observations
         params = self.kalman_filter.filter(a_sample, device=x.get_device())
+        _, _, _, _, next_means, _, A, C, alpha = params
         smoothed_means, _ = self.kalman_filter.smooth(a_sample, params=params)
         smoothed_obs = torch.matmul(C, torch.cat(smoothed_means).view(-1, seq_len, self.dim_z).unsqueeze(-1)).squeeze(1)
 
@@ -185,7 +186,7 @@ class KalmanVAE(nn.Module):
         else:
             imputed_data, _ = self.decoder(smoothed_obs.view(bs*seq_len, -1))
 
-        return imputed_data.view(bs, seq_len, *x.shape[2:])   
+        return imputed_data.view(bs, seq_len, *x.shape[2:]), alpha   
 
     def generate(self, x, mask, sample=False):  
 
