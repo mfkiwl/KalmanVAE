@@ -9,6 +9,8 @@ import numpy as np
 from Kalman_VAE import KalmanVAE
 from datetime import datetime
 
+from PIL import Image
+
 from dataloaders.bouncing_data import BouncingBallDataLoader
 from torch.utils.data import DataLoader
 
@@ -231,48 +233,101 @@ def test_generation(test_loader, mask, kvae, output_folder, args):
 
         print('Generation Mean-Squared-Error: ', mse_error/len(test_loader))
 
-def plot_imputation(test_dl, kvae, mask, output_folder, args):
+def plot_imputation(test_dl, kvae, mask, output_folder, args, single_plots=False):
 
-    # show 20 sequences
-    for sample_n in range(20):
+    # show 20 sequences individually
+    if single_plots:
+        for sample_n in range(20):
 
-        sample = test_dl[sample_n]
-        sample = sample > 0.5
-        batched_sample = torch.Tensor(sample).unsqueeze(0).to('cuda:0')
+            sample = test_dl[sample_n]
+            sample = sample > 0.5
+            batched_sample = torch.Tensor(sample).unsqueeze(0).to('cuda:0')
 
-        # get imputations
-        imputed_seq, alpha = kvae.impute(batched_sample, mask)
+            # get imputations
+            imputed_seq, alpha = kvae.impute(batched_sample, mask)
 
-        wieghts_dir = os.path.join(output_folder, '', 'sample_{}'.format(sample_n), '', 'weights')
-        if not os.path.isdir(wieghts_dir):
-            os.makedirs(wieghts_dir)
+            wieghts_dir = os.path.join(output_folder, '', 'sample_{}'.format(sample_n), '', 'weights')
+            if not os.path.isdir(wieghts_dir):
+                os.makedirs(wieghts_dir)
 
-        for step, (image, reconstruction, weight) in enumerate(zip(batched_sample.squeeze(0).cpu(), imputed_seq.detach().cpu().squeeze(0).numpy(), alpha.squeeze(0))):
+            for step, (image, reconstruction, weight) in enumerate(zip(batched_sample.squeeze(0).cpu(), imputed_seq.detach().cpu().squeeze(0).numpy(), alpha.squeeze(0))):
+                
+                image = image > 0.5
+                fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(10, 5))
+                fig.suptitle(f"$t = {step}$")
+
+                axes[0].imshow(image[0], vmin=0, vmax=1, cmap="Greys", aspect='equal')
+                axes[0].set_adjustable('box') 
+                axes[1].imshow(reconstruction[0], vmin=0, vmax=1, cmap="Greys", aspect='equal')
+                axes[2].bar(["0", "1", "2"], weight.detach().cpu().numpy())
+                axes[2].set_ylim(0, 1)
+                axes[0].set_title(r"image $\mathbf{x}_t$")
+                axes[1].set_title(r"reconstruction $\hat{\mathbf{x}}_t$")
+                axes[2].set_title(r"weight $\mathbf{k}_t$")
+                pos_img = axes[0].get_position()
+                pos_bar = axes[2].get_position()
+                axes[2].set_position([pos_bar.x0, pos_img.y0, pos_bar.width, pos_img.height])
+                
+                fig.savefig(os.path.join(wieghts_dir, 'weight-{}.png'.format(step)))
+                plt.close()
+    else:
+        # show 16 sequences in the same plot
+        name_im = 'batch_imputations'
+        imputations_dir = os.path.join(output_folder, '', name_im)
+        if not os.path.isdir(imputations_dir):
+                os.makedirs(imputations_dir)
+        name_gt = 'batch_gt'
+        gt_dir = os.path.join(output_folder, '', name_gt)
+        if not os.path.isdir(gt_dir):
+                os.makedirs(gt_dir)
+        joint_dir = os.path.join(output_folder, '', 'joint_gt_imputations')
+        if not os.path.isdir(joint_dir):
+            os.makedirs(joint_dir)
+
+        imgs_to_show = 16
+        batched_sample = torch.Tensor(test_dl).to('cuda:0')
+        batched_sample = batched_sample > 0.5
+        imputed_seq, _ = kvae.impute(batched_sample[:imgs_to_show], mask)
+        
+        for step in range(batched_sample.size(1)):
+        #for step, (image, reconstruction) in enumerate(zip(, imputed_seq.detach().squeeze(2).cpu().numpy())):
             
-            image = image > 0.5
-            fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(10, 5))
-            fig.suptitle(f"$t = {step}$")
+            image = batched_sample[:, step, :, :, :].squeeze(1).cpu()
+            reconstruction = imputed_seq[:, step, :, :, :].detach().squeeze(1).cpu()
 
-            axes[0].imshow(image[0], vmin=0, vmax=1, cmap="Greys", aspect='equal')
-            axes[0].set_adjustable('box') 
-            axes[1].imshow(reconstruction[0], vmin=0, vmax=1, cmap="Greys", aspect='equal')
-            axes[2].bar(["0", "1", "2"], weight.detach().cpu().numpy())
-            axes[2].set_ylim(0, 1)
-            axes[0].set_title(r"image $\mathbf{x}_t$")
-            axes[1].set_title(r"reconstruction $\hat{\mathbf{x}}_t$")
-            axes[2].set_title(r"weight $\mathbf{k}_t$")
-            pos_img = axes[0].get_position()
-            pos_bar = axes[2].get_position()
-            axes[2].set_position([pos_bar.x0, pos_img.y0, pos_bar.width, pos_img.height])
-            
-            fig.savefig(os.path.join(wieghts_dir, 'weight-{}.png'.format(step)))
+            fig_gt, axes_gt = plt.subplots(nrows=4, ncols=4, figsize=(15, 15))
+            fig_im, axes_im = plt.subplots(nrows=4, ncols=4, figsize=(15, 15))
+
+            fig_joint, axes_joint = plt.subplots(nrows=4, ncols=4, figsize=(15, 15))
+
+
+            image = image < 0.5
+            reconstruction = reconstruction < 0.5
+
+            for sample_n in range(imgs_to_show):
+
+                row = int(sample_n/4)
+                col = sample_n%4
+
+                bg_ch = image[sample_n].unsqueeze(-1).repeat(1, 1, 2)
+                r_ch = torch.ones(image[sample_n].size(0), image[sample_n].size(0), 1)
+                img_to_show = torch.cat([r_ch, bg_ch], dim=2)
+                recon_to_show = reconstruction[sample_n].unsqueeze(-1).repeat(1, 1, 3).float().numpy()
+
+                axes_gt[row, col].imshow(img_to_show, vmin=0, vmax=1, aspect='equal')
+                axes_gt[row, col].set_adjustable('box') 
+                axes_im[row, col].imshow(reconstruction[sample_n], vmin=0, vmax=1, cmap="Greys", aspect='equal')
+
+                axes_joint[row, col].imshow(img_to_show, vmin=0, vmax=1)
+                axes_joint[row, col].set_adjustable('box')
+                axes_joint[row, col].imshow(recon_to_show, vmin=0, vmax=1, alpha=0.5)
+
+            fig_im.savefig(os.path.join(imputations_dir, 'batched_imputations_{}.png'.format(step)))
+            fig_gt.savefig(os.path.join(gt_dir, 'batched_gt_{}.png'.format(step)))
+            fig_joint.savefig(os.path.join(joint_dir, 'join_gt_im_{}.png'.format(step)))
+
             plt.close()
 
-            '''
-            fig_gt = plt.figure()
-            plt.imshow(image[0], vmin=0, vmax=1, cmap="Greys", aspect='equal')
-            fig.savefig(os.path.join(wieghts_dir, 'weight-{}.png'.format(step)))
-            '''
 
 def main(args):
 
@@ -394,10 +449,11 @@ def main(args):
             save_filename = "/".join(path_to_dir) 
         
         #### RECONSTRUCTION
-        output_folder = os.path.join(save_filename, '', 'reconstructions')
-        if not os.path.exists('{}'.format(output_folder)):
-            os.makedirs(output_folder)
-        test_reconstruction(test_loader, kvae, output_folder, args)
+        if args.test_reconstruction:
+            output_folder = os.path.join(save_filename, '', 'reconstructions')
+            if not os.path.exists('{}'.format(output_folder)):
+                os.makedirs(output_folder)
+            test_reconstruction(test_loader, kvae, output_folder, args)
         
         #### IMPUTATION
         mask = [1] * T
@@ -406,26 +462,28 @@ def main(args):
         for mask_idx in range(len(mask)):
             if mask_idx in to_zero:
                 mask[mask_idx] = 0
-        output_folder = os.path.join(save_filename, '', 'imputations_{}'.format(str(int(args.masking_fraction*100))))
-        if not os.path.exists('{}'.format(output_folder)):
-            os.makedirs(output_folder)
-        # test_imputation(test_loader, kvae, mask, output_folder, args)
-
-        output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'mask_{}'.format(int(args.masking_fraction*100)))
-        if not os.path.isdir(output_folder):
-            os.makedirs(output_folder)
-        plot_imputation(test_dl, kvae, mask, output_folder, args)
+        if args.test_imputation:
+            output_folder = os.path.join(save_filename, '', 'imputations_{}'.format(str(int(args.masking_fraction*100))))
+            if not os.path.exists('{}'.format(output_folder)):
+                os.makedirs(output_folder)
+            test_imputation(test_loader, kvae, mask, output_folder, args)
+        else:
+            output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'mask_{}'.format(int(args.masking_fraction*100)))
+            if not os.path.isdir(output_folder):
+                os.makedirs(output_folder)
+            plot_imputation(test_dl, kvae, mask, output_folder, args)
         
         #### GENERATION
-        mask = [1] * args.n_of_frame_to_generate
-        to_zero = np.arange(8, args.n_of_frame_to_generate)
-        for mask_idx in range(len(mask)):
-            if mask_idx in to_zero:
-                mask[mask_idx] = 0
-        output_folder = os.path.join(save_filename, '', 'generations')
-        if not os.path.exists('{}'.format(output_folder)):
-            os.makedirs(output_folder)
-        # test_generation(test_loader, mask, kvae, output_folder, args)
+        if args.n_of_frame_to_generate > 0:
+            mask = [1] * args.n_of_frame_to_generate
+            to_zero = np.arange(8, args.n_of_frame_to_generate)
+            for mask_idx in range(len(mask)):
+                if mask_idx in to_zero:
+                    mask[mask_idx] = 0
+            output_folder = os.path.join(save_filename, '', 'generations')
+            if not os.path.exists('{}'.format(output_folder)):
+                os.makedirs(output_folder)
+            test_generation(test_loader, mask, kvae, output_folder, args)
 
 
 if __name__ == '__main__':
@@ -480,6 +538,10 @@ if __name__ == '__main__':
     # testing parameters
     parser.add_argument('--test', type=int, default=None,
         help='test model')
+    parser.add_argument('--test_reconstruction', type=int, default=1,
+        help='test model reconstruction')
+    parser.add_argument('--test_imputation', type=int, default=1,
+        help='test model imputation')
     parser.add_argument('--masking_fraction', type=float, default=0.3, 
         help='fraction fo sample being masked for testing imputation')
     parser.add_argument('--n_of_frame_to_generate', type=int, default=100, 
