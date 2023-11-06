@@ -233,7 +233,7 @@ def test_generation(test_loader, mask, kvae, output_folder, args):
 
         print('Generation Mean-Squared-Error: ', mse_error/len(test_loader))
 
-def plot_imputation(test_dl, kvae, mask, output_folder, args, single_plots=False):
+def plot(test_dl, kvae, mask, output_folder, args, which, single_plots=False):
 
     # show 20 sequences individually
     if single_plots:
@@ -244,7 +244,8 @@ def plot_imputation(test_dl, kvae, mask, output_folder, args, single_plots=False
             batched_sample = torch.Tensor(sample).unsqueeze(0).to('cuda:0')
 
             # get imputations
-            imputed_seq, alpha = kvae.impute(batched_sample, mask)
+            if which == 'imputation':
+                imputed_seq, alpha = kvae.impute(batched_sample, mask)
 
             wieghts_dir = os.path.join(output_folder, '', 'sample_{}'.format(sample_n), '', 'weights')
             if not os.path.isdir(wieghts_dir):
@@ -272,7 +273,10 @@ def plot_imputation(test_dl, kvae, mask, output_folder, args, single_plots=False
                 plt.close()
     else:
         # show 16 sequences in the same plot
-        name_im = 'batch_imputations'
+        if which == 'imputation':
+            name_im = 'batch_imputations'
+        else:
+            name_im = 'batch_generations'
         imputations_dir = os.path.join(output_folder, '', name_im)
         if not os.path.isdir(imputations_dir):
                 os.makedirs(imputations_dir)
@@ -280,26 +284,33 @@ def plot_imputation(test_dl, kvae, mask, output_folder, args, single_plots=False
         gt_dir = os.path.join(output_folder, '', name_gt)
         if not os.path.isdir(gt_dir):
                 os.makedirs(gt_dir)
-        joint_dir = os.path.join(output_folder, '', 'joint_gt_imputations')
+        if which == 'imputation':
+            name_joint = 'joint_gt_imputations'
+        else:
+            name_joint = 'joint_gt_generations'
+        joint_dir = os.path.join(output_folder, '', name_joint)
         if not os.path.isdir(joint_dir):
             os.makedirs(joint_dir)
 
         imgs_to_show = 16
         batched_sample = torch.Tensor(test_dl).to('cuda:0')
         batched_sample = batched_sample > 0.5
-        imputed_seq, _ = kvae.impute(batched_sample[:imgs_to_show], mask)
+
+        if which == 'imputation':
+            x_hat, _ = kvae.impute(batched_sample[:imgs_to_show], mask)
+        else:
+            x_hat = kvae.generate(batched_sample[:imgs_to_show], mask)
         
         for step in range(batched_sample.size(1)):
-        #for step, (image, reconstruction) in enumerate(zip(, imputed_seq.detach().squeeze(2).cpu().numpy())):
+        #for step, (image, reconstruction) in enumerate(zip(, x_hat.detach().squeeze(2).cpu().numpy())):
             
             image = batched_sample[:, step, :, :, :].squeeze(1).cpu()
-            reconstruction = imputed_seq[:, step, :, :, :].detach().squeeze(1).cpu()
+            reconstruction = x_hat[:, step, :, :, :].detach().squeeze(1).cpu()
 
             fig_gt, axes_gt = plt.subplots(nrows=4, ncols=4, figsize=(15, 15))
             fig_im, axes_im = plt.subplots(nrows=4, ncols=4, figsize=(15, 15))
 
             fig_joint, axes_joint = plt.subplots(nrows=4, ncols=4, figsize=(15, 15))
-
 
             image = image < 0.5
             reconstruction = reconstruction < 0.5
@@ -335,6 +346,7 @@ def main(args):
     print('MODEL PATH', args.kvae_model)
     print('TRAIN: ', args.train)
     print('TEST: ', args.test)
+    print('USE_MLP: ', args.use_MLP)
     print('########################################')
 
     # load data
@@ -359,7 +371,8 @@ def main(args):
                      args.K, 
                      T=T, 
                      recon_scale=args.recon_scale,
-                     use_bernoulli=args.use_bernoulli).cuda().to('cuda:' + str(args.device))
+                     use_bernoulli=args.use_bernoulli,
+                     use_MLP=args.use_MLP).cuda().to('cuda:' + str(args.device))
     
     # if already trained, load checkpoints
     if args.kvae_model is not None:
@@ -404,7 +417,7 @@ def main(args):
                             name=run_name)
     
         # define number of epochs when NOT to train Dynamic Parameter Network
-        n_epoch_initial = 20
+        n_epoch_initial = args.n_epoch_initial
         train_dyn_net = False
 
         for epoch in range(args.num_epochs):
@@ -467,11 +480,10 @@ def main(args):
             if not os.path.exists('{}'.format(output_folder)):
                 os.makedirs(output_folder)
             test_imputation(test_loader, kvae, mask, output_folder, args)
-        else:
             output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'mask_{}'.format(int(args.masking_fraction*100)))
             if not os.path.isdir(output_folder):
                 os.makedirs(output_folder)
-            plot_imputation(test_dl, kvae, mask, output_folder, args)
+            plot(test_dl, kvae, mask, output_folder, args, which='imputation')
         
         #### GENERATION
         if args.n_of_frame_to_generate > 0:
@@ -484,6 +496,10 @@ def main(args):
             if not os.path.exists('{}'.format(output_folder)):
                 os.makedirs(output_folder)
             test_generation(test_loader, mask, kvae, output_folder, args)
+            output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'generations')
+            if not os.path.isdir(output_folder):
+                os.makedirs(output_folder)
+            plot(test_dl, kvae, mask, output_folder, args, which='generation')
 
 
 if __name__ == '__main__':
@@ -510,6 +526,8 @@ if __name__ == '__main__':
         help='dimensionality of encoded vector u')
     parser.add_argument('--K', type=int, default=3,
         help='number of LGSSMs to be mixed')
+    parser.add_argument('--use_MLP', type=int, default=1,
+        help='use MLP head in Dynamics Parameter Network')
     parser.add_argument('--T', type=int, default=50,
         help='number of timestep in the dataset')
 
@@ -544,7 +562,7 @@ if __name__ == '__main__':
         help='test model imputation')
     parser.add_argument('--masking_fraction', type=float, default=0.3, 
         help='fraction fo sample being masked for testing imputation')
-    parser.add_argument('--n_of_frame_to_generate', type=int, default=100, 
+    parser.add_argument('--n_of_frame_to_generate', type=int, default=50, 
         help='number of sample we want to generate')
 
     # logistics
