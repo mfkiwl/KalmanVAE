@@ -148,16 +148,20 @@ class Kalman_Filter(nn.Module):
         if self.use_KVAE:
 
             # get alpha
-            code_and_abs = torch.cat([a_0, a], dim=1)
-            if imputation_idx is not None:
-                code_and_abs = code_and_abs[:, :imputation_idx, :]
-            if train_dyn_net:
-                alpha = self.dyn_net(code_and_abs[:, :-1, :]) # (bs, L, K)
-            else:
-                alpha = self.dyn_net(code_and_abs[:, :-1, :]).detach() # (bs, L, K)
+            code_and_obs = torch.cat([a_0, a], dim=1)
 
             if imputation_idx is not None:
-                to_concat = torch.zeros(bs, self.T-imputation_idx+1, self.K).to(device)
+                code_and_obs = code_and_obs[:, :imputation_idx, :]
+            else:
+                code_and_obs = code_and_obs[:, :-1, :]
+
+            if train_dyn_net:
+                alpha = self.dyn_net(code_and_obs) # (bs, L, K)
+            else:
+                alpha = self.dyn_net(code_and_obs).detach() # (bs, L, K)
+
+            if imputation_idx is not None:
+                to_concat = torch.zeros(bs, self.T-imputation_idx, self.K).to(device)
                 alpha = torch.cat([alpha, to_concat], dim=1)
 
             # get mixture of As and Cs
@@ -173,11 +177,10 @@ class Kalman_Filter(nn.Module):
 
             # account for initialization states
             if t_step == 0:
-                mu_pred = torch.matmul(A[:, t_step, :, :], mu.unsqueeze(2)).squeeze(2)
-                sigma_pred = torch.matmul(torch.matmul(A[:, t_step, :, :], sigma), torch.transpose(A[:, t_step, :, :],1,2)) + self.Q
-                
-                # mu_pred = mu
-                # sigma_pred = sigma
+                #mu_pred = torch.matmul(A[:, t_step, :, :], mu.unsqueeze(2)).squeeze(2)
+                #sigma_pred = torch.matmul(torch.matmul(A[:, t_step, :, :], sigma), torch.transpose(A[:, t_step, :, :],1,2)) + self.Q
+                mu_pred = mu
+                sigma_pred = sigma
             
             # collect predicted mean and predicted covariance
             next_means.append(mu_pred)
@@ -206,8 +209,8 @@ class Kalman_Filter(nn.Module):
 
             # get predicted mean and covariances
             if t_step != sequence_len -1:
-                mu_pred = torch.matmul(A[:, t_step, :, :], mu.unsqueeze(2)).squeeze(2)
-                sigma_pred = torch.matmul(torch.matmul(A[:, t_step, :, :], sigma), torch.transpose(A[:, t_step+1, :, :],1,2)) + self.Q
+                mu_pred = torch.matmul(A[:, t_step+1, :, :], mu.unsqueeze(2)).squeeze(2)
+                sigma_pred = torch.matmul(torch.matmul(A[:, t_step+1, :, :], sigma), torch.transpose(A[:, t_step+1, :, :],1,2)) + self.Q
         
             # collect mean and covariance
             means.append(mu)
@@ -228,7 +231,7 @@ class Kalman_Filter(nn.Module):
         bs, sequence_len = a.size(0), a.size(1)
 
         # get filtered mean and covariances for initialization of Kalman smoother
-        _, _, filtered_means, filtered_covariances, next_means, next_covariances, A, _, alpha = params
+        _, _, filtered_means, filtered_covariances, next_means, next_covariances, A, _, _ = params
 
         # collect smoothed means and covariance
         means = [filtered_means[-1]]

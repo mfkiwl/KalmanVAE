@@ -302,7 +302,6 @@ def plot(test_dl, kvae, mask, output_folder, args, which, single_plots=False):
             x_hat = kvae.generate(batched_sample[:imgs_to_show], mask)
         
         for step in range(batched_sample.size(1)):
-        #for step, (image, reconstruction) in enumerate(zip(, x_hat.detach().squeeze(2).cpu().numpy())):
             
             image = batched_sample[:, step, :, :, :].squeeze(1).cpu()
             reconstruction = x_hat[:, step, :, :, :].detach().squeeze(1).cpu()
@@ -479,10 +478,11 @@ def main(args):
             output_folder = os.path.join(save_filename, '', 'imputations_{}'.format(str(int(args.masking_fraction*100))))
             if not os.path.exists('{}'.format(output_folder)):
                 os.makedirs(output_folder)
-            test_imputation(test_loader, kvae, mask, output_folder, args)
+            # test_imputation(test_loader, kvae, mask, output_folder, args)
             output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'mask_{}'.format(int(args.masking_fraction*100)))
             if not os.path.isdir(output_folder):
                 os.makedirs(output_folder)
+            print('Plotting Imputation ...')
             plot(test_dl, kvae, mask, output_folder, args, which='imputation')
         
         #### GENERATION
@@ -495,10 +495,11 @@ def main(args):
             output_folder = os.path.join(save_filename, '', 'generations')
             if not os.path.exists('{}'.format(output_folder)):
                 os.makedirs(output_folder)
-            test_generation(test_loader, mask, kvae, output_folder, args)
+            #test_generation(test_loader, mask, kvae, output_folder, args)
             output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'generations')
             if not os.path.isdir(output_folder):
                 os.makedirs(output_folder)
+            print('Plotting Generation ...')
             plot(test_dl, kvae, mask, output_folder, args, which='generation')
 
 
