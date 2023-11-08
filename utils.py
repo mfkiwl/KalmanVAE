@@ -66,7 +66,10 @@ class Gaussian_Encoder(nn.Module):
             x = x.view(-1, self.n_channels[-1]*(self.conv_out_size[-1]**2))
             mean = self.to_mean(x)
             std = F.softplus(self.to_std(x))
-            return mean, std
+
+            dist = Distributions.Normal(loc=mean, scale=std)
+
+            return dist
 
         else:
             return x
@@ -118,7 +121,7 @@ class Gaussian_Decoder(nn.Module):
         
         self.n_channels = n_channels # reversed wrt to input in constructor
         
-    def forward(self, encodings, recon_only=False, clip=True):
+    def forward(self, encodings, recon_only=False, clip=False):
         if self.latent_dim > 0:
             x = F.relu(self.to_conv(encodings)).view(-1, 
                                                     self.n_channels[0], 

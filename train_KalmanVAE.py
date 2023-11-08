@@ -55,7 +55,7 @@ def train(train_loader, kvae, optimizer, train_dyn_net, args):
         for key in idv_losses.keys():
             idv_losses[key] += loss_dict[key]
 
-        alphas = alpha.cpu()
+        alphas = alpha.detach().cpu()
 
     for key in idv_losses.keys():
         idv_losses[key] = idv_losses[key]/len(train_loader)
@@ -535,7 +535,7 @@ if __name__ == '__main__':
     # training parameters
     parser.add_argument('--train', type=int, default=None,
         help='train model')
-    parser.add_argument('--batch_size', type=int, default=64,
+    parser.add_argument('--batch_size', type=int, default=128,
         help='batch size for training')
     parser.add_argument('--lr', type=float, default=0.0001,
         help='learning rate for training')
