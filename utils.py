@@ -66,10 +66,8 @@ class Gaussian_Encoder(nn.Module):
             x = x.view(-1, self.n_channels[-1]*(self.conv_out_size[-1]**2))
             mean = self.to_mean(x)
             std = F.softplus(self.to_std(x))
-
-            dist = Distributions.Normal(loc=mean, scale=std)
-
-            return dist
+            
+            return mean, std
 
         else:
             return x

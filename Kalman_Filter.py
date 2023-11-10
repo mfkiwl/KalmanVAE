@@ -58,7 +58,9 @@ class Kalman_Filter(nn.Module):
                  K=3,
                  T=1,
                  use_KVAE=True, 
-                 use_MLP=True):
+                 use_MLP=True, 
+                 init_weight=0.9, 
+                 mlp_dim=128):
 
         super(Kalman_Filter, self).__init__()
         
@@ -69,32 +71,43 @@ class Kalman_Filter(nn.Module):
         self.T = T
         self.use_KVAE = use_KVAE
         self.use_MLP = use_MLP
-
+        
+        # initialize transition matrices
         if isinstance(A_init, int):
-            self.A = torch.eye(self.dim_z)
+            self.A = nn.Parameter((1-init_weight)*torch.randn(self.K, self.dim_z, self.dim_z)
+                                   + init_weight*torch.eye(self.dim_z))  
         else:
             self.A = A_init
-        if self.dim_u > 0:
-            if isinstance(B_init, int):
-                self.B = torch.eye(self.dim_z, self.dim_u)
-            else:
-                self.B = B_init
         if isinstance(C_init, int):
-            self.C = torch.eye(self.dim_a, self.dim_z)
+            self.C = nn.Parameter((1-init_weight)*torch.randn(self.K, self.dim_a, self.dim_z) 
+                                   + init_weight*torch.eye(self.dim_a, self.dim_z))
         else:
             self.C = C_init
-
+        if self.dim_u > 0:
+            if isinstance(B_init, int):
+                self.B = nn.Parameter((1-init_weight)*torch.randn(self.K, self.dim_z, self.dim_u)
+                                       + init_weight*torch.eye(self.dim_z, self.dim_u))
+            else:
+                self.B = B_init
+        
+        # initialize start code and Dynamics Network (if KVAE is used - else make parameters non-trainable)
         if self.use_KVAE:
-            self.dyn_net = Dynamics_Network(self.dim_a, 128, self.K, use_MLP=self.use_MLP)
-            self.A = nn.Parameter(self.A.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
-            if self.dim_u > 0:
-                self.B = nn.Parameter(self.B.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
-            self.C = nn.Parameter(self.C.unsqueeze(0).unsqueeze(1).repeat(self.K, T, 1, 1))
             self.a_0 = nn.Parameter(torch.zeros(self.dim_a))
+            self.dyn_net = Dynamics_Network(dim_a=self.dim_a, 
+                                            dim_hidden=mlp_dim, 
+                                            K=self.K, 
+                                            use_MLP=self.use_MLP)
+        else:
+            self.A = self.A.detach()
+            self.C = self.C.detach()
+            if self.dim_u > 0:
+                self.B = self.B.detach()
 
+        # initialize noise variables
         self.R = R_init*torch.eye(self.dim_a)
         self.Q = Q_init*torch.eye(self.dim_z)
 
+        # initialize start state and start covariance
         if isinstance(mu_init, int):
             self.mu = torch.zeros(self.dim_z)
         else:
@@ -124,10 +137,6 @@ class Kalman_Filter(nn.Module):
 
         # adjust A,B,C depending on whether we are using KVAE or not
         if self.use_KVAE:
-            A = self.A.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_z, dim_z)
-            if self.dim_u > 0:
-                B = self.B.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_z, dim_u)
-            C = self.C.unsqueeze(0).repeat(bs, 1, 1, 1, 1) # (bs, seq_len, K, dim_a, dim_z)
             a_0 = self.a_0.unsqueeze(0).unsqueeze(1).repeat(bs, 1, 1)
         else:
             A = self.A.unsqueeze(0).unsqueeze(1).repeat(bs, sequence_len, 1, 1) # (bs, seq_len, dim_z, dim_z)
@@ -165,8 +174,8 @@ class Kalman_Filter(nn.Module):
                 alpha = torch.cat([alpha, to_concat], dim=1)
 
             # get mixture of As and Cs
-            A = torch.einsum('blk,bklij->blij', alpha, A)
-            C = torch.einsum('blk,bklij->blij', alpha, C)
+            A = torch.einsum('blk,kij->blij', alpha, self.A)
+            C = torch.einsum('blk,kij->blij', alpha, self.C)
         
         if device is not None:
             self.R = self.R.to(device)

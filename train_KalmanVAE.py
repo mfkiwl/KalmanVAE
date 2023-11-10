@@ -45,7 +45,7 @@ def train(train_loader, kvae, optimizer, train_dyn_net, args):
         sample = sample > 0.5
         sample = sample.cuda().float().to('cuda:' + str(args.device))
 
-        _, alpha, loss, loss_dict = kvae.calculate_loss(sample, train_dyn_net)
+        _, alpha, loss, loss_dict = kvae.calculate_loss(sample, train_dyn_net=train_dyn_net)
 
         loss.backward()
         optimizer.step()
@@ -400,7 +400,7 @@ def main(args):
             else:
                 binary = False
             run = wandb.init(project="KalmanVAE", 
-                            config={"dataset" : args.dataset,
+                             config={"dataset" : args.dataset,
                                     "binary" : binary,
                                     "train-with-masking": args.train_with_masking,
                                     "batch-size" : args.batch_size,
@@ -416,13 +416,11 @@ def main(args):
                             name=run_name)
     
         # define number of epochs when NOT to train Dynamic Parameter Network
-        n_epoch_initial = args.n_epoch_initial
         train_dyn_net = False
-
         for epoch in range(args.num_epochs):
             
             # delay training of Dynamics Parameter Network to epoch = n_epoch_initial
-            if epoch >= n_epoch_initial:
+            if epoch >= args.n_epoch_initial:
                 train_dyn_net = True
 
             # train 
