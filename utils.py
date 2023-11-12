@@ -67,7 +67,8 @@ class Gaussian_Encoder(nn.Module):
             mean = self.to_mean(x)
             std = F.softplus(self.to_std(x))
             
-            return mean, std
+            # return mean, std
+            return Distributions.Normal(loc=mean, scale=std)
 
         else:
             return x

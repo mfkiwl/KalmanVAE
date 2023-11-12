@@ -13,9 +13,15 @@ from torch.utils.data import DataLoader
 
 def loss_function(x, x_hat, mean, log_var):
     reproduction_loss = nn.functional.mse_loss(x_hat, x, reduction='sum')
-    KLD = - 0.5 * torch.sum(1+ log_var - mean.pow(2) - log_var.exp())
+    KLD = - 0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
 
     return reproduction_loss + KLD, [reproduction_loss, KLD]
+
+def loss_function_bernoulli(x, x_dist, mean, var):
+    log_prob = x_dist.log_prob(x.view(-1, *x.shape[2:])).sum(-1).sum(-1).sum()
+    KLD = - 0.5 * torch.sum(1 + var - mean.pow(2) - var.exp())
+    
+    return -log_prob + KLD, [log_prob, KLD]
 
 def train(train_loader, vae, optimizer, args):
     loss_epoch = 0.
@@ -26,13 +32,15 @@ def train(train_loader, vae, optimizer, args):
 
         optimizer.zero_grad()
         
+        # get sample
+        sample = sample > 0.5
         sample = sample.cuda().float().to(args.device)
 
-        x_hat, mean, std = vae(sample.view(-1, *sample.shape[2:]))
+        # forward pass
+        x_dist, mean, var = vae(sample.view(-1, *sample.shape[2:]))
 
-        x_hat = x_hat.view(sample.size(0), sample.size(1), *sample.shape[2:])
-
-        loss, idv_losses_list = loss_function(sample, x_hat, mean, std)
+        # calculate loss
+        loss, idv_losses_list = loss_function_bernoulli(sample, x_dist, mean, var)
 
         idv_losses['reconstruction-loss'] += idv_losses_list[0]
         idv_losses['KL-loss'] += idv_losses_list[1]
@@ -56,13 +64,12 @@ def test(test_loader, vae, args):
     with torch.no_grad():
         for _, sample in enumerate(test_loader, 1):
 
+            sample = sample > 0.5
             sample = sample.cuda().float().to(args.device)
 
-            x_hat, mean, std = vae(sample.view(sample.size(0)*sample.size(1), *sample.shape[2:]))
+            x_dist, mean, var = vae(sample.view(-1, *sample.shape[2:]))
             
-            x_hat = x_hat.view(sample.size(0),sample.size(1),*sample.shape[2:])
-
-            loss, idv_losses_list = loss_function(sample, x_hat, mean, std)
+            loss, idv_losses_list = loss_function_bernoulli(sample, x_dist, mean, var)
 
             idv_losses['reconstruction-loss'] += idv_losses_list[0]
             idv_losses['KL-loss'] += idv_losses_list[1]
@@ -80,13 +87,17 @@ def test_reconstruction(test_loader, vae, output_folder, args):
     with torch.no_grad():
         mse_error = 0
         for i, sample in enumerate(test_loader, 1):
-
+            
+            sample = sample > 0.5
             sample = sample.cuda().float()
             B, T, C, d1, d2 = sample.size()
 
             # get mean-squared-error on test data
-            x_hat, mean, std = vae(sample.view(sample.size(0)*sample.size(1), *sample.shape[2:]))
+            x_dist, _, _ = vae(sample.view(-1, *sample.shape[2:]))
+
+            x_hat = x_dist.mean
             x_hat = x_hat.view(B, T, C, d1, d2)
+
             mse = nn.MSELoss()
             mse_error += mse(x_hat, sample)
             
@@ -106,9 +117,6 @@ def test_reconstruction(test_loader, vae, output_folder, args):
                         axs[1, j].imshow(pred_to_plot.cpu().numpy(), cmap='gray', vmin=0, vmax=255)
     
                     fig.savefig(output_folder + '/reconstruction_{}'.format(str(sample_num+1)))
-
-            # visualize differences in trajectories between sample and reconstruction
-            # TODO
 
         print('Test Mean-Squared-Error: ', mse_error/len(test_loader))
 

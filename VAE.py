@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from utils import Gaussian_Encoder, Gaussian_Decoder
+from utils import Gaussian_Encoder, Gaussian_Decoder, Bernoulli_Decoder
 
 class VAE(nn.Module):
 
@@ -18,19 +18,25 @@ class VAE(nn.Module):
 
         self.encoder = Gaussian_Encoder(channels_in=n_channels_in, 
                                         image_size=self.image_size, 
-                                        latent_dim=self.latent_dim)
+                                        latent_dim=self.latent_dim, 
+                                        n_channels=[16])
         
-        self.decoder = Gaussian_Decoder(channels_in=n_channels_in, 
+        self.decoder = Bernoulli_Decoder(channels_in=n_channels_in, 
                                         image_size=self.image_size, 
-                                        latent_dim=self.latent_dim)
+                                        latent_dim=self.latent_dim, 
+                                        n_channels=[16])
 
     def log_gaussian(x, mean, var):
         const_log_pdf = (- 0.5 * torch.log(2 * torch.pi)).astype('float32')
         return const_log_pdf - torch.log(var)
     
     def forward(self, x):
-        mean, std = self.encoder(x)
-        gaussian_sample = mean + std*torch.randn_like(std)
-        reconstructions = self.decoder(gaussian_sample, recon_only=True, clip=True)
 
-        return reconstructions, mean, std
+        # encode sample
+        a_dist = self.encoder(x) 
+        a_sample = a_dist.rsample()
+
+        # get reconstruction i.e. get p_{theta} (x|a)
+        x_dist = self.decoder(a_sample)
+
+        return x_dist, a_dist.mean, a_dist.variance

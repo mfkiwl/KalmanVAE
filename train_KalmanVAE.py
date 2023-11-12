@@ -27,7 +27,7 @@ def plot_dynamics(alphas, output_folder, n_samples=20):
 
         fig.savefig(output_folder + 'dyn_bars_{}.png'.format(n_sample))
 
-def train(train_loader, kvae, optimizer, train_dyn_net, args):
+def train(train_loader, kvae, optimizer, train_dyn_net, args, dtype, upscale_vae_loss, use_mean):
 
     loss_epoch = 0.
     idv_losses = {'reconstruction loss': 0,
@@ -39,13 +39,16 @@ def train(train_loader, kvae, optimizer, train_dyn_net, args):
     kvae.train()
 
     for n, sample in enumerate(train_loader, 1):
-
+        
         optimizer.zero_grad()
 
         sample = sample > 0.5
-        sample = sample.cuda().float().to('cuda:' + str(args.device))
+        sample = sample.to(dtype).to('cuda:' + str(args.device))
 
-        _, alpha, loss, loss_dict = kvae.calculate_loss(sample, train_dyn_net=train_dyn_net)
+        _, alpha, loss, loss_dict = kvae.calculate_loss(sample, 
+                                                        train_dyn_net=train_dyn_net, 
+                                                        upscale_vae_loss=upscale_vae_loss, 
+                                                        use_mean=use_mean)
 
         loss.backward()
         optimizer.step()
@@ -62,7 +65,7 @@ def train(train_loader, kvae, optimizer, train_dyn_net, args):
     
     return loss_epoch/len(train_loader), idv_losses, alphas
 
-def test_reconstruction(test_loader, kvae, output_folder, args):
+def test_reconstruction(test_loader, kvae, output_folder, args, dtype):
 
     kvae.eval()
     with torch.no_grad():
@@ -70,7 +73,7 @@ def test_reconstruction(test_loader, kvae, output_folder, args):
         for i, sample in enumerate(test_loader, 1):
             
             sample = sample > 0.5
-            sample = sample.cuda().float().to('cuda:' + str(args.device))
+            sample = sample.to(dtype).to('cuda:' + str(args.device))
             B, T, C, d1, d2 = sample.size()
 
             # get mean-squared-error on test data
@@ -98,7 +101,7 @@ def test_reconstruction(test_loader, kvae, output_folder, args):
 
         print('Reconstruction Mean-Squared-Error: ', mse_error/len(test_loader))
 
-def test_imputation(test_loader, kvae, mask, output_folder, args):
+def test_imputation(test_loader, kvae, mask, output_folder, args, dtype):
     
     kvae.eval()
     with torch.no_grad():
@@ -106,7 +109,7 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
         for i, sample in enumerate(test_loader, 1):
             
             sample = sample > 0.5
-            sample = sample.cuda().float().to('cuda:' + str(args.device))
+            sample = sample.to(dtype).to('cuda:' + str(args.device))
             B, T, C, d1, d2 = sample.size()
 
             # get imputations
@@ -187,7 +190,8 @@ def test_imputation(test_loader, kvae, mask, output_folder, args):
             '''
         print('Imputation Mean-Squared-Error: ', mse_error/len(test_loader))
 
-def test_generation(test_loader, mask, kvae, output_folder, args):
+def test_generation(test_loader, mask, kvae, output_folder, args, dtype):
+    
     kvae.eval()
     with torch.no_grad():
 
@@ -195,7 +199,7 @@ def test_generation(test_loader, mask, kvae, output_folder, args):
         for i, sample in enumerate(test_loader, 1):
             
             sample = sample > 0.5
-            sample = sample.cuda().float().to('cuda:' + str(args.device))
+            sample = sample.to(dtype).to('cuda:' + str(args.device))
 
             # get imputations
             generated_seq = kvae.generate(sample, mask)
@@ -233,7 +237,7 @@ def test_generation(test_loader, mask, kvae, output_folder, args):
 
         print('Generation Mean-Squared-Error: ', mse_error/len(test_loader))
 
-def plot(test_dl, kvae, mask, output_folder, args, which, single_plots=False):
+def plot(test_dl, kvae, mask, output_folder, args, which, dtype, single_plots=False, ):
 
     # show 20 sequences individually
     if single_plots:
@@ -241,7 +245,7 @@ def plot(test_dl, kvae, mask, output_folder, args, which, single_plots=False):
 
             sample = test_dl[sample_n]
             sample = sample > 0.5
-            batched_sample = torch.Tensor(sample).unsqueeze(0).to('cuda:0')
+            batched_sample = torch.Tensor(sample).unsqueeze(0).to(dtype).to('cuda:0')
 
             # get imputations
             if which == 'imputation':
@@ -295,6 +299,7 @@ def plot(test_dl, kvae, mask, output_folder, args, which, single_plots=False):
         imgs_to_show = 16
         batched_sample = torch.Tensor(test_dl).to('cuda:0')
         batched_sample = batched_sample > 0.5
+        batched_sample = batched_sample.to(dtype)
 
         if which == 'imputation':
             x_hat, _ = kvae.impute(batched_sample[:imgs_to_show], mask)
@@ -356,6 +361,12 @@ def main(args):
     train_loader = DataLoader(train_dl, batch_size=args.batch_size, shuffle=True)
     test_loader = DataLoader(test_dl, batch_size=args.batch_size, shuffle=True)
 
+    # choose data format
+    if args.use_double:
+        dtype = torch.float64
+    else:
+        dtype = torch.float32
+
     # get image size
     it = iter(train_loader)
     first = next(it)
@@ -371,7 +382,9 @@ def main(args):
                      T=T, 
                      recon_scale=args.recon_scale,
                      use_bernoulli=args.use_bernoulli,
-                     use_MLP=args.use_MLP).cuda().to('cuda:' + str(args.device))
+                     use_MLP=args.use_MLP,
+                     symmetric_covariance=args.symmetric_covariance,
+                     dtype=dtype).to('cuda:' + str(args.device)).to(dtype=dtype)
     
     # if already trained, load checkpoints
     if args.kvae_model is not None:
@@ -405,6 +418,7 @@ def main(args):
                                     "train-with-masking": args.train_with_masking,
                                     "batch-size" : args.batch_size,
                                     "iterations" : args.num_epochs,
+                                    "n_epoch_initial": args.n_epoch_initial,
                                     "learning-rate" : args.lr, 
                                     "learning-rate-scheduler": args.lr_scheduler, 
                                     "gamma": args.gamma_lr_schedule,
@@ -412,7 +426,11 @@ def main(args):
                                     "a-dimensions": args.dim_a, 
                                     "z-dimensions": args.dim_z, 
                                     "number-of-dynamics-K": args.K,
-                                    "reconstruction-weight": args.recon_scale},
+                                    "reconstruction-weight": args.recon_scale,
+                                    "use_bernoulli": args.use_bernoulli,
+                                    "use-double": args.use_double, 
+                                    "upscale_vae_loss": args.upscale_vae_loss, 
+                                    "use_mean": args.use_mean},
                             name=run_name)
     
         # define number of epochs when NOT to train Dynamic Parameter Network
@@ -423,8 +441,15 @@ def main(args):
             if epoch >= args.n_epoch_initial:
                 train_dyn_net = True
 
-            # train 
-            loss_train, loss_dict, alphas = train(train_loader, kvae, optimizer, train_dyn_net, args)
+            # TRAIN 
+            loss_train, loss_dict, _ = train(train_loader=train_loader, 
+                                             kvae=kvae, 
+                                             optimizer=optimizer, 
+                                             train_dyn_net=train_dyn_net, 
+                                             args=args, 
+                                             dtype=dtype, 
+                                             upscale_vae_loss=args.upscale_vae_loss, 
+                                             use_mean=args.use_mean)
             if args.use_wandb:
                 run.log(loss_dict)
             if epoch % 20 == 0 and epoch > 0:
@@ -435,11 +460,15 @@ def main(args):
             print(log)
             log_list.append(log + '\n')
 
-            # valid reconstruction 
+            # VALID  
             output_folder = os.path.join(save_filename, '', 'validation', '', 'epoch_{}'.format(str(epoch)))
             if not os.path.exists('{}'.format(output_folder)):
                 os.makedirs(output_folder)
-            test_reconstruction(test_loader, kvae, output_folder, args)
+            test_reconstruction(test_loader=test_loader, 
+                                kvae=kvae, 
+                                output_folder=output_folder, 
+                                args=args, 
+                                dtype=dtype)
 
             # save checkpoints 
             if epoch % 10 == 0 or epoch == args.num_epochs-1:
@@ -453,7 +482,7 @@ def main(args):
     
     if args.test:
         
-        #### GET FILENAME
+        #### get filename
         if not args.train:
             path_to_dir = args.kvae_model.split('/')[:-1]
             save_filename = "/".join(path_to_dir) 
@@ -463,9 +492,13 @@ def main(args):
             output_folder = os.path.join(save_filename, '', 'reconstructions')
             if not os.path.exists('{}'.format(output_folder)):
                 os.makedirs(output_folder)
-            test_reconstruction(test_loader, kvae, output_folder, args)
+            test_reconstruction(test_loader=test_loader, 
+                                kvae=kvae, 
+                                output_folder=output_folder, 
+                                args=args, 
+                                dtype=dtype)
         
-        #### IMPUTATION
+        #### IMPUTATION 
         mask = [1] * T
         n_of_samples_to_mask = int((T - 8)*args.masking_fraction)
         to_zero = random.sample(range(4, T-4), n_of_samples_to_mask)
@@ -476,15 +509,28 @@ def main(args):
             output_folder = os.path.join(save_filename, '', 'imputations_{}'.format(str(int(args.masking_fraction*100))))
             if not os.path.exists('{}'.format(output_folder)):
                 os.makedirs(output_folder)
-            # test_imputation(test_loader, kvae, mask, output_folder, args)
+            print('Testing Imputation ...')
+            test_imputation(test_loader=test_loader, 
+                             kvae=kvae, 
+                             mask=mask, 
+                             output_folder=output_folder, 
+                             args=args, 
+                             dtype=dtype)
+        if args.plot_imputation:
             output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'mask_{}'.format(int(args.masking_fraction*100)))
             if not os.path.isdir(output_folder):
                 os.makedirs(output_folder)
             print('Plotting Imputation ...')
-            plot(test_dl, kvae, mask, output_folder, args, which='imputation')
+            plot(test_dl=test_dl, 
+                 kvae=kvae, 
+                 mask=mask, 
+                 output_folder=output_folder, 
+                 args=args, 
+                 which='imputation',
+                 dtype=dtype)
         
         #### GENERATION
-        if args.n_of_frame_to_generate > 0:
+        if args.test_generation:
             mask = [1] * args.n_of_frame_to_generate
             to_zero = np.arange(8, args.n_of_frame_to_generate)
             for mask_idx in range(len(mask)):
@@ -493,12 +539,25 @@ def main(args):
             output_folder = os.path.join(save_filename, '', 'generations')
             if not os.path.exists('{}'.format(output_folder)):
                 os.makedirs(output_folder)
-            #test_generation(test_loader, mask, kvae, output_folder, args)
+            print('Testing Generation ...')
+            test_generation(test_loader=test_loader, 
+                            mask=mask, 
+                            kvae=kvae, 
+                            output_folder=output_folder, 
+                            args=args, 
+                            dtype=dtype)
+        if args.plot_generation:
             output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'generations')
             if not os.path.isdir(output_folder):
                 os.makedirs(output_folder)
             print('Plotting Generation ...')
-            plot(test_dl, kvae, mask, output_folder, args, which='generation')
+            plot(test_dl=test_dl, 
+                 kvae=kvae, 
+                 mask=mask, 
+                 output_folder=output_folder, 
+                 args=args, 
+                 which='generation',
+                 dtype=dtype)
 
 
 if __name__ == '__main__':
@@ -515,6 +574,8 @@ if __name__ == '__main__':
         help='number of color channels in the data')
     parser.add_argument('--train_with_masking', type=bool, default=False, 
         help='training with masked sequences')
+    parser.add_argument('--use_double', type=int, default=1, 
+        help='train with dtype=float64')
 
     # encoder parameters
     parser.add_argument('--dim_a', type=int, default=2,
@@ -551,7 +612,13 @@ if __name__ == '__main__':
         help='use bernoulli in the decoder')
     parser.add_argument('--n_epoch_initial', type=int, default=20,
         help='number of epochs to wait for to train dynamics parameter')
-    
+    parser.add_argument('--upscale_vae_loss', type=int, default=1, 
+        help='decide whether to up-weigh the loss of encoder and decoder')
+    parser.add_argument('--use_mean', type=int, default=0, 
+        help='decide whether to average over sequences during training')
+    parser.add_argument('--symmetric_covariance', type=int, default=1, 
+        help='decide whether to symmetrize covariances in Kalman Filter')
+
     # testing parameters
     parser.add_argument('--test', type=int, default=None,
         help='test model')
@@ -559,8 +626,14 @@ if __name__ == '__main__':
         help='test model reconstruction')
     parser.add_argument('--test_imputation', type=int, default=1,
         help='test model imputation')
+    parser.add_argument('--plot_imputation', type=int, default=1,
+        help='plot model imputation')
     parser.add_argument('--masking_fraction', type=float, default=0.3, 
         help='fraction fo sample being masked for testing imputation')
+    parser.add_argument('--test_generation', type=int, default=1, 
+        help='test model generation')
+    parser.add_argument('--plot_generation', type=int, default=1,
+        help='plot model generation')
     parser.add_argument('--n_of_frame_to_generate', type=int, default=50, 
         help='number of sample we want to generate')
 

@@ -24,7 +24,7 @@ class Dynamics_Network(nn.Module):
             num_layers = 2
         else: 
             dim = self.K
-            num_layers = 5
+            num_layers = 2
 
         self.lstm = nn.LSTM(self.dim_a, 
                             dim, 
@@ -60,7 +60,9 @@ class Kalman_Filter(nn.Module):
                  use_KVAE=True, 
                  use_MLP=True, 
                  init_weight=0.9, 
-                 mlp_dim=128):
+                 mlp_dim=128, 
+                 symmetric_covariance=True,
+                 dtype=torch.float32):
 
         super(Kalman_Filter, self).__init__()
         
@@ -71,6 +73,7 @@ class Kalman_Filter(nn.Module):
         self.T = T
         self.use_KVAE = use_KVAE
         self.use_MLP = use_MLP
+        self.symmetric_covariance = symmetric_covariance
         
         # initialize transition matrices
         if isinstance(A_init, int):
@@ -109,15 +112,19 @@ class Kalman_Filter(nn.Module):
 
         # initialize start state and start covariance
         if isinstance(mu_init, int):
-            self.mu = torch.zeros(self.dim_z)
+            self.mu = torch.zeros(self.dim_z).to(dtype)
         else:
             self.mu = mu_init
         if isinstance(sigma_init, int):
-            self.sigma = torch.eye(self.dim_z)
+            self.sigma = torch.eye(self.dim_z).to(dtype)
         else:
             self.sigma = sigma_init
 
-    def filter(self, a, train_dyn_net=True, imputation_idx=None, device=None):
+    def filter(self, 
+               a, 
+               train_dyn_net=True, 
+               imputation_idx=None, 
+               device=None):
 
         '''
         This method carries out Kalman filtering based 
@@ -180,16 +187,13 @@ class Kalman_Filter(nn.Module):
         if device is not None:
             self.R = self.R.to(device)
             self.Q = self.Q.to(device)
+        
+        # initialize predicted mean and variance
+        mu_pred = mu
+        sigma_pred = sigma
 
         # iterate through the length of the sequence
         for t_step in range(sequence_len):
-
-            # account for initialization states
-            if t_step == 0:
-                #mu_pred = torch.matmul(A[:, t_step, :, :], mu.unsqueeze(2)).squeeze(2)
-                #sigma_pred = torch.matmul(torch.matmul(A[:, t_step, :, :], sigma), torch.transpose(A[:, t_step, :, :],1,2)) + self.Q
-                mu_pred = mu
-                sigma_pred = sigma
             
             # collect predicted mean and predicted covariance
             next_means.append(mu_pred)
@@ -216,11 +220,17 @@ class Kalman_Filter(nn.Module):
                 I = I.to(device)
             sigma = torch.matmul((I - KC), sigma_pred)
 
+            if self.symmetric_covariance:
+                sigma = (sigma + sigma.transpose(1, 2))/2.0
+
             # get predicted mean and covariances
             if t_step != sequence_len -1:
                 mu_pred = torch.matmul(A[:, t_step+1, :, :], mu.unsqueeze(2)).squeeze(2)
                 sigma_pred = torch.matmul(torch.matmul(A[:, t_step+1, :, :], sigma), torch.transpose(A[:, t_step+1, :, :],1,2)) + self.Q
-        
+                
+                if self.symmetric_covariance:
+                    sigma_pred = (sigma_pred + sigma_pred.transpose(1, 2))/2.0
+
             # collect mean and covariance
             means.append(mu)
             covariances.append(sigma)
@@ -257,6 +267,9 @@ class Kalman_Filter(nn.Module):
             mu_t_T = filtered_means[t_step_reversed] + torch.matmul(J, (means[0] - next_means[t_step_reversed+1]).unsqueeze(2)).squeeze(2)
             sigma_t_T = filtered_covariances[t_step_reversed] + torch.matmul(torch.matmul(J, covariances[0] - next_covariances[t_step_reversed+1]), torch.transpose(J, 1,2))
             
+            if self.symmetric_covariance:
+                sigma_t_T = (sigma_t_T + sigma_t_T.transpose(1,2))/2.0
+
             means.insert(0, mu_t_T)
             covariances.insert(0, sigma_t_T)
         
