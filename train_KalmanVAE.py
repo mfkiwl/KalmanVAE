@@ -14,7 +14,7 @@ from PIL import Image
 from dataloaders.bouncing_data import BouncingBallDataLoader
 from torch.utils.data import DataLoader
 
-def plot_dynamics(alphas, output_folder, n_samples=20):
+def plot_dynamics(alphas, output_folder, n_samples=5):
     for n_sample in range(n_samples):
         sample_dyn = alphas[n_sample, :, :]
         fig, axs = plt.subplots(nrows=3, ncols=1, figsize=(10, 6))
@@ -384,7 +384,8 @@ def main(args):
                      use_bernoulli=args.use_bernoulli,
                      use_MLP=args.use_MLP,
                      symmetric_covariance=args.symmetric_covariance,
-                     dtype=dtype).to('cuda:' + str(args.device)).to(dtype=dtype)
+                     dtype=dtype, 
+                     device='cuda:' + str(args.device)).to('cuda:' + str(args.device)).to(dtype=dtype)
     
     # if already trained, load checkpoints
     if args.kvae_model is not None:

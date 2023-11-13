@@ -51,18 +51,20 @@ class Kalman_Filter(nn.Module):
                  A_init=1,
                  B_init=1,
                  C_init=1,
-                 R_init=0.01,
-                 Q_init=0.01,
+                 R_init=0.001,
+                 Q_init=0.001,
                  mu_init=0,
                  sigma_init=1,
                  K=3,
                  T=1,
                  use_KVAE=True, 
                  use_MLP=True, 
-                 init_weight=0.9, 
+                 init_weight_A=1, 
+                 init_weight_C=0,
                  mlp_dim=128, 
                  symmetric_covariance=True,
-                 dtype=torch.float32):
+                 dtype=torch.float32, 
+                 device=None):
 
         super(Kalman_Filter, self).__init__()
         
@@ -74,22 +76,23 @@ class Kalman_Filter(nn.Module):
         self.use_KVAE = use_KVAE
         self.use_MLP = use_MLP
         self.symmetric_covariance = symmetric_covariance
+        self.device = device
         
         # initialize transition matrices
         if isinstance(A_init, int):
-            self.A = nn.Parameter((1-init_weight)*torch.randn(self.K, self.dim_z, self.dim_z)
-                                   + init_weight*torch.eye(self.dim_z))  
+            self.A = nn.Parameter((1-init_weight_A)*torch.randn(self.K, self.dim_z, self.dim_z)
+                                   + init_weight_A*torch.eye(self.dim_z))  
         else:
             self.A = A_init
         if isinstance(C_init, int):
-            self.C = nn.Parameter((1-init_weight)*torch.randn(self.K, self.dim_a, self.dim_z) 
-                                   + init_weight*torch.eye(self.dim_a, self.dim_z))
+            self.C = nn.Parameter((1-init_weight_C)*torch.randn(self.K, self.dim_a, self.dim_z) 
+                                   + init_weight_C*torch.eye(self.dim_a, self.dim_z))
         else:
             self.C = C_init
         if self.dim_u > 0:
             if isinstance(B_init, int):
-                self.B = nn.Parameter((1-init_weight)*torch.randn(self.K, self.dim_z, self.dim_u)
-                                       + init_weight*torch.eye(self.dim_z, self.dim_u))
+                self.B = nn.Parameter((1-init_weight_A)*torch.randn(self.K, self.dim_z, self.dim_u)
+                                       + init_weight_A*torch.eye(self.dim_z, self.dim_u))
             else:
                 self.B = B_init
         
@@ -112,19 +115,18 @@ class Kalman_Filter(nn.Module):
 
         # initialize start state and start covariance
         if isinstance(mu_init, int):
-            self.mu = torch.zeros(self.dim_z).to(dtype)
+            self.mu = torch.zeros(self.dim_z).to(dtype).to(self.device)
         else:
             self.mu = mu_init
         if isinstance(sigma_init, int):
-            self.sigma = torch.eye(self.dim_z).to(dtype)
+            self.sigma = torch.eye(self.dim_z).to(dtype).to(self.device)
         else:
             self.sigma = sigma_init
 
     def filter(self, 
                a, 
                train_dyn_net=True, 
-               imputation_idx=None, 
-               device=None):
+               imputation_idx=None):
 
         '''
         This method carries out Kalman filtering based 
@@ -137,10 +139,6 @@ class Kalman_Filter(nn.Module):
         # define mean and covariance for initial state z_0 = N(0, I)
         mu = self.mu.unsqueeze(0).repeat(bs, 1) # (bs, dim_z)
         sigma = self.sigma.unsqueeze(0).repeat(bs, 1, 1) # (bs, dim_z, dim_z)
-
-        if device is not None:
-            mu = mu.to(device)
-            sigma = sigma.to(device)
 
         # adjust A,B,C depending on whether we are using KVAE or not
         if self.use_KVAE:
@@ -177,16 +175,16 @@ class Kalman_Filter(nn.Module):
                 alpha = self.dyn_net(code_and_obs).detach() # (bs, L, K)
 
             if imputation_idx is not None:
-                to_concat = torch.zeros(bs, self.T-imputation_idx, self.K).to(device)
+                to_concat = torch.zeros(bs, self.T-imputation_idx, self.K).to(self.device)
                 alpha = torch.cat([alpha, to_concat], dim=1)
 
             # get mixture of As and Cs
             A = torch.einsum('blk,kij->blij', alpha, self.A)
             C = torch.einsum('blk,kij->blij', alpha, self.C)
         
-        if device is not None:
-            self.R = self.R.to(device)
-            self.Q = self.Q.to(device)
+        if self.device is not None:
+            self.R = self.R.to(self.device)
+            self.Q = self.Q.to(self.device)
         
         # initialize predicted mean and variance
         mu_pred = mu
@@ -207,7 +205,7 @@ class Kalman_Filter(nn.Module):
 
             # get Kalman gain
             S = torch.matmul(torch.matmul(C[:, t_step, :, :], sigma_pred), torch.transpose(C[:, t_step, :, :],1,2)) + self.R
-            S_inv = torch.linalg.inv(S)
+            S_inv = torch.inverse(S)
             K = torch.matmul(torch.matmul(sigma_pred, torch.transpose(C[:, t_step, :, :],1,2)), S_inv)   
 
             # update mean
@@ -216,8 +214,8 @@ class Kalman_Filter(nn.Module):
             # update covariance
             KC = torch.matmul(K, C[:, t_step, :, :])
             I = torch.eye(self.dim_z).repeat(bs, 1, 1)
-            if device is not None:
-                I = I.to(device)
+            if self.device is not None:
+                I = I.to(self.device)
             sigma = torch.matmul((I - KC), sigma_pred)
 
             if self.symmetric_covariance:
@@ -247,7 +245,7 @@ class Kalman_Filter(nn.Module):
         from the filtered mean and covariance at time t=T
         '''
 
-        bs, sequence_len = a.size(0), a.size(1)
+        sequence_len = a.size(1)
 
         # get filtered mean and covariances for initialization of Kalman smoother
         _, _, filtered_means, filtered_covariances, next_means, next_covariances, A, _, _ = params
@@ -257,15 +255,17 @@ class Kalman_Filter(nn.Module):
         covariances = [filtered_covariances[-1]]
 
         # iterate through the sequence in reverse order and start from penultimate item
-        for t_step_reversed in reversed(range(sequence_len-1)):
+        for t in reversed(range(sequence_len-1)):
             
             # get backwards Kalman Gain
-            J = torch.matmul(torch.transpose(A[:, t_step_reversed+1, :, :], 1,2), torch.linalg.inv(next_covariances[t_step_reversed+1]))
-            J = torch.matmul(filtered_covariances[t_step_reversed], J)
+            J = torch.matmul(filtered_covariances[t], torch.matmul(torch.transpose(A[:, t+1, :, :], 1,2), \
+                             torch.inverse(next_covariances[t+1])))
 
             # get smoothed mean and covariance
-            mu_t_T = filtered_means[t_step_reversed] + torch.matmul(J, (means[0] - next_means[t_step_reversed+1]).unsqueeze(2)).squeeze(2)
-            sigma_t_T = filtered_covariances[t_step_reversed] + torch.matmul(torch.matmul(J, covariances[0] - next_covariances[t_step_reversed+1]), torch.transpose(J, 1,2))
+            mu_t_T = filtered_means[t] + \
+                     torch.matmul(J, (means[0] - next_means[t+1]).unsqueeze(2)).squeeze(2)
+            sigma_t_T = filtered_covariances[t] + \
+                     torch.matmul(torch.matmul(J, covariances[0] - next_covariances[t+1]), torch.transpose(J, 1, 2))
             
             if self.symmetric_covariance:
                 sigma_t_T = (sigma_t_T + sigma_t_T.transpose(1,2))/2.0
