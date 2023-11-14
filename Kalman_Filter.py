@@ -77,14 +77,15 @@ class Kalman_Filter(nn.Module):
         self.use_MLP = use_MLP
         self.symmetric_covariance = symmetric_covariance
         self.device = device
+        self.A_init = A_init
         
         # initialize transition matrices
-        if isinstance(A_init, int):
+        if isinstance(A_init, int) or isinstance(A_init, float):
             self.A = nn.Parameter((1-init_weight_A)*torch.randn(self.K, self.dim_z, self.dim_z)
-                                   + init_weight_A*torch.eye(self.dim_z))  
+                                   + init_weight_A*torch.eye(self.dim_z))
         else:
             self.A = A_init
-        if isinstance(C_init, int):
+        if isinstance(C_init, int) or isinstance(C_init, float):
             self.C = nn.Parameter((1-init_weight_C)*torch.randn(self.K, self.dim_a, self.dim_z) 
                                    + init_weight_C*torch.eye(self.dim_a, self.dim_z))
         else:
@@ -125,7 +126,7 @@ class Kalman_Filter(nn.Module):
 
     def filter(self, 
                a, 
-               train_dyn_net=True, 
+               train_dyn_net=None, 
                imputation_idx=None):
 
         '''
@@ -140,10 +141,8 @@ class Kalman_Filter(nn.Module):
         mu = self.mu.unsqueeze(0).repeat(bs, 1) # (bs, dim_z)
         sigma = self.sigma.unsqueeze(0).repeat(bs, 1, 1) # (bs, dim_z, dim_z)
 
-        # adjust A,B,C depending on whether we are using KVAE or not
-        if self.use_KVAE:
-            a_0 = self.a_0.unsqueeze(0).unsqueeze(1).repeat(bs, 1, 1)
-        else:
+        # adjust A,B,C depending on whether we are using KVAE or not           
+        if not self.use_KVAE:
             A = self.A.unsqueeze(0).unsqueeze(1).repeat(bs, sequence_len, 1, 1) # (bs, seq_len, dim_z, dim_z)
             if self.dim_u > 0:
                 B = self.B.unsqueeze(0).unsqueeze(1).repeat(bs, sequence_len, 1, 1) # (bs, seq_len, dim_z, dim_u)
@@ -160,27 +159,7 @@ class Kalman_Filter(nn.Module):
 
         # compute mixture of A and C in case we are use Kalman filter in KVAE
         if self.use_KVAE:
-
-            # get alpha
-            code_and_obs = torch.cat([a_0, a], dim=1)
-
-            if imputation_idx is not None:
-                code_and_obs = code_and_obs[:, :imputation_idx, :]
-            else:
-                code_and_obs = code_and_obs[:, :-1, :]
-
-            if train_dyn_net:
-                alpha = self.dyn_net(code_and_obs) # (bs, L, K)
-            else:
-                alpha = self.dyn_net(code_and_obs).detach() # (bs, L, K)
-
-            if imputation_idx is not None:
-                to_concat = torch.zeros(bs, self.T-imputation_idx, self.K).to(self.device)
-                alpha = torch.cat([alpha, to_concat], dim=1)
-
-            # get mixture of As and Cs
-            A = torch.einsum('blk,kij->blij', alpha, self.A)
-            C = torch.einsum('blk,kij->blij', alpha, self.C)
+            A, C, alpha = self.compute_transition_matrices(a, train_dyn_net, imputation_idx)
         
         if self.device is not None:
             self.R = self.R.to(self.device)
@@ -199,6 +178,10 @@ class Kalman_Filter(nn.Module):
             
             # get predicted observation
             a_pred = torch.matmul(C[:, t_step, :, :], mu_pred.unsqueeze(2)).squeeze(2)
+
+            if imputation_idx is not None:
+                if t_step == imputation_idx: 
+                    break
 
             # get residual
             r = a[:, t_step, :] - a_pred
@@ -233,7 +216,10 @@ class Kalman_Filter(nn.Module):
             means.append(mu)
             covariances.append(sigma)
         
-        return mu, sigma, means, covariances, next_means, next_covariances, A, C, alpha
+        if self.use_KVAE:
+            return mu, sigma, means, covariances, next_means, next_covariances, A, C, alpha
+        else:
+            mu, sigma, means, covariances, next_means, next_covariances, A, C
 
     def smooth(self, a, params):
 
@@ -256,7 +242,7 @@ class Kalman_Filter(nn.Module):
 
         # iterate through the sequence in reverse order and start from penultimate item
         for t in reversed(range(sequence_len-1)):
-            
+
             # get backwards Kalman Gain
             J = torch.matmul(filtered_covariances[t], torch.matmul(torch.transpose(A[:, t+1, :, :], 1,2), \
                              torch.inverse(next_covariances[t+1])))
@@ -275,3 +261,29 @@ class Kalman_Filter(nn.Module):
         
         return means, covariances
             
+    def compute_transition_matrices(self, a, train_dyn_net=False, imputation_idx=None):
+        
+        batch_size = a.size(0)
+        a_0 = self.a_0.unsqueeze(0).unsqueeze(1).repeat(batch_size, 1, 1)
+
+        code_and_obs = torch.cat([a_0, a], dim=1) # [(bs, 1, dim_a), (bs, T, dim_a)
+
+        if imputation_idx is not None:
+            code_and_obs = code_and_obs[:, :imputation_idx+1, :]
+        else:
+            code_and_obs = code_and_obs[:, :-1, :]
+
+        if train_dyn_net:
+            alpha = self.dyn_net(code_and_obs) # (bs, L, K)
+        else:
+            alpha = self.dyn_net(code_and_obs).detach() # (bs, L, K)
+
+        if imputation_idx is not None:
+            to_concat = torch.zeros(batch_size, self.T-imputation_idx-1, self.K).to(self.device)
+            alpha = torch.cat([alpha, to_concat], dim=1) 
+
+        # get mixture of As and Cs
+        A = torch.einsum('blk,kij->blij', alpha, self.A)
+        C = torch.einsum('blk,kij->blij', alpha, self.C)
+
+        return A, C, alpha

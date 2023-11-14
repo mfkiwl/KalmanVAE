@@ -15,6 +15,8 @@ class KalmanVAE(nn.Module):
                  dim_z, 
                  K, 
                  T, 
+                 A_init=1., 
+                 C_init=0.,
                  recon_scale=0.3,
                  dim_u=0, 
                  x_var=0.01, 
@@ -30,6 +32,7 @@ class KalmanVAE(nn.Module):
         # initialize variables (for Kalman filter)
         self.dim_a = dim_a
         self.dim_z = dim_z
+        self.dim_u = dim_u
         self.K = K
         self.T = T
         self.use_MLP = use_MLP
@@ -42,6 +45,8 @@ class KalmanVAE(nn.Module):
                                            dim_a=self.dim_a, 
                                            K=self.K, 
                                            T=self.T, 
+                                           init_weight_A=A_init, 
+                                           init_weight_C=C_init,
                                            use_MLP=self.use_MLP, 
                                            dtype=dtype, 
                                            symmetric_covariance=symmetric_covariance, 
@@ -207,7 +212,7 @@ class KalmanVAE(nn.Module):
             loss_dict = {'reconstruction loss': self.recon_scale*log_p_x_given_a.detach().cpu().numpy(),
                         'encoder loss': log_q_a_given_x.detach().cpu().numpy(), 
                         'LGSSM observation log likelihood': log_p_a_given_z.detach().cpu().numpy(),
-                        'LGSSM tranisition log likelihood': log_p_zT_given_zt.detach().cpu().numpy(), 
+                        'LGSSM tranisition log likelihood': log_p_zT_given_zt.detach().cpu().numpy() + log_p_z0.detach().cpu().numpy(), 
                         'LGSSM tranisition log posterior': log_p_z_given_a.detach().cpu().numpy()}
 
             return x_hat, alpha, -self.recon_scale*log_p_x_given_a + log_q_a_given_x + log_p_z_given_a - log_p_a_given_z - log_p_zT_given_zt - log_p_z0, loss_dict
@@ -222,6 +227,9 @@ class KalmanVAE(nn.Module):
         # get dims
         batch_size = x.size(0)
         seq_len = x.size(1)
+
+        # get encoded observations for visualization purposes
+        gt_sample = self.encoder(x.view(-1, *x.shape[2:])).mean.detach().view(batch_size, seq_len, self.dim_a)
         
         # convert mask to torch tensor
         mask_t = torch.Tensor(mask).unsqueeze(0).unsqueeze(2).unsqueeze(3).unsqueeze(4).repeat(batch_size, 1, 1, x.size(3), x.size(4)).to(self.device)
@@ -245,26 +253,33 @@ class KalmanVAE(nn.Module):
                 continue
             else:
                 # get filtered distribution up to t=t-1
-                _, _, _, _, next_means, _, A, C, alpha = self.kalman_filter.filter(a_sample, imputation_idx=t)
+                _, _, _, _, next_means, _, _, C, alpha = self.kalman_filter.filter(a_sample, imputation_idx=t)
 
                 # get predicted observation 
                 a_sample[:, t, :] = torch.matmul(C[:, t, :, :], torch.stack(next_means).permute(1,0,2)[:, t, :].unsqueeze(-1)).squeeze(-1)
-        
 
-        # get filtered+smoothed distribution and smoothed observations
+        # filter estimated sequence (to include last 4 frames, or any observed frame that might be in the sequence)
         params = self.kalman_filter.filter(a_sample)
-        _, _, _, _, _, _, _, C, alpha = params
+        _, _, filtered_means, _, _, _, _, C, alpha = params
+        
+        # get smoothed observations
         smoothed_means, _ = self.kalman_filter.smooth(a_sample, params=params)
         smoothed_obs = torch.matmul(C, torch.stack(smoothed_means).permute(1,0,2).unsqueeze(-1)).squeeze(1)
 
+        # get filtered observations  
+        filtered_obs = torch.matmul(C, torch.stack(filtered_means).permute(1,0,2).unsqueeze(-1)).squeeze(1)
+        
         # decode smoothed observations
         if self.use_bernoulli:
-            x_dist = self.decoder(smoothed_obs.view(batch_size*seq_len, -1))
-            imputed_data = x_dist.mean
-        else:
-            imputed_data, _ = self.decoder(smoothed_obs.view(batch_size*seq_len, -1))
+            x_dist_smooth = self.decoder(smoothed_obs.view(batch_size*seq_len, -1))
+            imputed_smoothed_data = x_dist_smooth.mean.view(batch_size, seq_len, *x.shape[2:]).detach()
 
-        return imputed_data.view(batch_size, seq_len, *x.shape[2:]), alpha
+            x_dist_filtered = self.decoder(filtered_obs.view(batch_size*seq_len, -1))
+            imputed_filtered_data = x_dist_filtered.mean.view(batch_size, seq_len, *x.shape[2:]).detach()
+        else:
+            imputed_smoothed_data, _ = self.decoder(smoothed_obs.view(batch_size*seq_len, -1)).view(batch_size, seq_len, *x.shape[2:]).detach()
+
+        return imputed_smoothed_data, imputed_filtered_data, alpha.detach(), filtered_obs.detach(), smoothed_obs.detach(), gt_sample
 
     def generate(self, x, mask, sample=False):  
 

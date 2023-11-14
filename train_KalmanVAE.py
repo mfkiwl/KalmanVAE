@@ -5,6 +5,8 @@ import wandb
 import matplotlib.pyplot as plt 
 import random
 import numpy as np
+import cv2
+
 
 from Kalman_VAE import KalmanVAE
 from datetime import datetime
@@ -13,6 +15,9 @@ from PIL import Image
 
 from dataloaders.bouncing_data import BouncingBallDataLoader
 from torch.utils.data import DataLoader
+from moviepy.editor import ImageSequenceClip
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+
 
 def plot_dynamics(alphas, output_folder, n_samples=5):
     for n_sample in range(n_samples):
@@ -237,62 +242,144 @@ def test_generation(test_loader, mask, kvae, output_folder, args, dtype):
 
         print('Generation Mean-Squared-Error: ', mse_error/len(test_loader))
 
-def plot(test_dl, kvae, mask, output_folder, args, which, dtype, single_plots=False, ):
-
-    # show 20 sequences individually
+def plot(test_dl, kvae, mask, output_folder, args, which, dtype, single_plots=False, training=False, n_samples_to_plot=5, device=0, return_paths=False):
+    
     if single_plots:
-        for sample_n in range(20):
+        # show 20 sequences individually + trajectories in observation-space
+        root_dir = os.path.join(output_folder, 'trajectories', '')
+        if not os.path.isdir:
+            os.mkdir(root_dir)
+        
+        video_paths = []
 
+        for sample_n in range(n_samples_to_plot):
+
+            # get sample
             sample = test_dl[sample_n]
             sample = sample > 0.5
-            batched_sample = torch.Tensor(sample).unsqueeze(0).to(dtype).to('cuda:0')
+            batched_sample = torch.Tensor(sample).unsqueeze(0).to(dtype).to('cuda:{}'.format(device))
 
             # get imputations
             if which == 'imputation':
-                imputed_seq, alpha = kvae.impute(batched_sample, mask)
+                imputed_seq, imputed_filtered_seq, alpha, filtered_obs, smoothed_obs, gt_smoothed_obs = kvae.impute(batched_sample, mask)
+                filtered_obs = filtered_obs.squeeze(-1).cpu()
+                smoothed_obs = smoothed_obs.squeeze(-1).cpu()
+                gt_smoothed_obs = gt_smoothed_obs.squeeze(-1).cpu()
+            
+            f_max = filtered_obs.max()
+            f_min = filtered_obs.min()
 
-            wieghts_dir = os.path.join(output_folder, '', 'sample_{}'.format(sample_n), '', 'weights')
-            if not os.path.isdir(wieghts_dir):
-                os.makedirs(wieghts_dir)
+            s_max = smoothed_obs.max()
+            s_min = smoothed_obs.min()
 
-            for step, (image, reconstruction, weight) in enumerate(zip(batched_sample.squeeze(0).cpu(), imputed_seq.detach().cpu().squeeze(0).numpy(), alpha.squeeze(0))):
-                
-                image = image > 0.5
-                fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(10, 5))
-                fig.suptitle(f"$t = {step}$")
+            gt_max = gt_smoothed_obs.max()
+            gt_min= gt_smoothed_obs.min()
 
-                axes[0].imshow(image[0], vmin=0, vmax=1, cmap="Greys", aspect='equal')
+            max_obs_vals = max([f_max, s_max, gt_max])
+            min_obs_vals = min([f_min, s_min, gt_min])
+
+            sample_dir = os.path.join(root_dir, 'sample_{}'.format(sample_n), '')
+            if not os.path.isdir(sample_dir):
+                os.makedirs(sample_dir)
+            frames_dir = os.path.join(sample_dir, '', 'filt_vs_smooth')
+            if not os.path.isdir(frames_dir):
+                os.makedirs(frames_dir)
+
+            png_files = []
+
+            # for visualization purposes
+            cmap = plt.get_cmap("tab10")
+            batched_sample = batched_sample < 0.5
+            batched_sample = batched_sample.float()
+            imputed_seq = imputed_seq < 0.5
+            imputed_seq = imputed_seq.float()
+            imputed_filtered_seq = imputed_filtered_seq < 0.5
+            imputed_filtered_seq = imputed_filtered_seq.float()
+
+            path_out = os.path.join(sample_dir, 'trajectories.mp4')
+
+            if training:
+                video_paths.append(path_out)
+
+            if training:
+                fourcc = cv2.VideoWriter_fourcc(*"mp4")
+                frame_size = (1600, 400)
+                fps = 10
+                video = cv2.VideoWriter(path_out, fourcc, fps, frame_size)
+
+            for t in range(batched_sample.size(1)):
+                fig, axes = plt.subplots(nrows=1, ncols=4, figsize=(16, 4))
+                fig.suptitle(f"$t = {t}$")
+
+                bg_ch = batched_sample[0, t, 0].cpu().unsqueeze(-1).repeat(1, 1, 2)
+                r_ch = torch.ones(batched_sample[0, t, 0].size(0), batched_sample[0, t, 0].size(0), 1)
+                gt_to_show = torch.cat([r_ch, bg_ch], dim=2)
+
+                im_s_to_show = imputed_seq[0, t, 0].unsqueeze(-1).repeat(1, 1, 3).float().detach().cpu().numpy()
+                im_f_to_show = imputed_filtered_seq[0, t, 0].unsqueeze(-1).repeat(1, 1, 3).float().detach().cpu().numpy()
+
+
+                axes[0].imshow(gt_to_show, vmin=0, vmax=1)
+                axes[0].imshow(im_s_to_show, vmin=0, vmax=1, alpha=0.5)
                 axes[0].set_adjustable('box') 
-                axes[1].imshow(reconstruction[0], vmin=0, vmax=1, cmap="Greys", aspect='equal')
-                axes[2].bar(["0", "1", "2"], weight.detach().cpu().numpy())
+                axes[0].set_title(r"imputation smoothed $\mathbf{x}_t$")
+
+                axes[1].imshow(gt_to_show, vmin=0, vmax=1)
+                axes[1].imshow(im_f_to_show, vmin=0, vmax=1, alpha=0.5)
+                axes[1].set_adjustable('box') 
+                axes[1].set_title(r"imputation filtered $\mathbf{x}_t$")
+
+                axes[2].bar(["0", "1", "2"], alpha[0, t, :].detach().cpu().numpy())
                 axes[2].set_ylim(0, 1)
-                axes[0].set_title(r"image $\mathbf{x}_t$")
-                axes[1].set_title(r"reconstruction $\hat{\mathbf{x}}_t$")
                 axes[2].set_title(r"weight $\mathbf{k}_t$")
+
                 pos_img = axes[0].get_position()
                 pos_bar = axes[2].get_position()
                 axes[2].set_position([pos_bar.x0, pos_img.y0, pos_bar.width, pos_img.height])
+
+                axes[3].plot(filtered_obs[0, 0:t, 0], filtered_obs[0, 0:t, 1], ".-", color=cmap(0), label='Filtered')
+                axes[3].plot(smoothed_obs[0, 0:t, 0], smoothed_obs[0, 0:t, 1],".-", color=cmap(1), label='Smoothed')
+                axes[3].plot(gt_smoothed_obs[0, 0:t, 0], gt_smoothed_obs[0, 0:t, 1], ".-", color="black", label='Ground-Truth')
+                axes[3].set_xlim([min_obs_vals, max_obs_vals])
+                axes[3].set_ylim([min_obs_vals, max_obs_vals])
+                axes[3].legend()
+                axes[3].grid()
                 
-                fig.savefig(os.path.join(wieghts_dir, 'weight-{}.png'.format(step)))
-                plt.close()
+                plt.tight_layout()
+
+                if training:
+                    canvas = FigureCanvas(fig)
+                    canvas.draw()
+                    matplotlib_image = np.array(canvas.renderer.buffer_rgba())
+                    opencv_image = cv2.cvtColor(matplotlib_image, cv2.COLOR_RGBA2BGR)
+                    video.write(opencv_image)
+                
+                else:
+                    fig.savefig(os.path.join(frames_dir, 'visualization-{}.png'.format(t)))
+                    png_files.append(os.path.join(frames_dir, 'visualization-{}.png'.format(t)))
+
+                plt.close(fig)
+
+            if training:
+                video.release()
+
+            else:
+                clip = ImageSequenceClip(png_files, fps=10)
+                clip.write_videofile(path_out, codec="libx264")
+        
+        if return_paths:
+            return video_paths
+
     else:
-        # show 16 sequences in the same plot
-        if which == 'imputation':
-            name_im = 'batch_imputations'
-        else:
-            name_im = 'batch_generations'
-        imputations_dir = os.path.join(output_folder, '', name_im)
-        if not os.path.isdir(imputations_dir):
-                os.makedirs(imputations_dir)
-        name_gt = 'batch_gt'
-        gt_dir = os.path.join(output_folder, '', name_gt)
-        if not os.path.isdir(gt_dir):
-                os.makedirs(gt_dir)
+        # show 16 sequences in the same plot    
+        root_dir = os.path.join(output_folder, 'batch_visualizations', '')
+        if not os.path.isdir:
+            os.mkdir(root_dir)
         if which == 'imputation':
             name_joint = 'joint_gt_imputations'
         else:
             name_joint = 'joint_gt_generations'
-        joint_dir = os.path.join(output_folder, '', name_joint)
+        joint_dir = os.path.join(root_dir, '', name_joint)
         if not os.path.isdir(joint_dir):
             os.makedirs(joint_dir)
 
@@ -306,15 +393,18 @@ def plot(test_dl, kvae, mask, output_folder, args, which, dtype, single_plots=Fa
         else:
             x_hat = kvae.generate(batched_sample[:imgs_to_show], mask)
         
+        png_files = []
+
         for step in range(batched_sample.size(1)):
             
             image = batched_sample[:, step, :, :, :].squeeze(1).cpu()
             reconstruction = x_hat[:, step, :, :, :].detach().squeeze(1).cpu()
 
-            fig_gt, axes_gt = plt.subplots(nrows=4, ncols=4, figsize=(15, 15))
-            fig_im, axes_im = plt.subplots(nrows=4, ncols=4, figsize=(15, 15))
-
             fig_joint, axes_joint = plt.subplots(nrows=4, ncols=4, figsize=(15, 15))
+            if args.consecutive_masking:
+                fig_joint.suptitle("Masking {}% - {}".format(int(args.masking_fraction*100), "Consecutive"))
+            else:
+                fig_joint.suptitle("Masking {}% - {}".format(int(args.masking_fraction*100), "Random"))
 
             image = image < 0.5
             reconstruction = reconstruction < 0.5
@@ -329,19 +419,20 @@ def plot(test_dl, kvae, mask, output_folder, args, which, dtype, single_plots=Fa
                 img_to_show = torch.cat([r_ch, bg_ch], dim=2)
                 recon_to_show = reconstruction[sample_n].unsqueeze(-1).repeat(1, 1, 3).float().numpy()
 
-                axes_gt[row, col].imshow(img_to_show, vmin=0, vmax=1, aspect='equal')
-                axes_gt[row, col].set_adjustable('box') 
-                axes_im[row, col].imshow(reconstruction[sample_n], vmin=0, vmax=1, cmap="Greys", aspect='equal')
-
                 axes_joint[row, col].imshow(img_to_show, vmin=0, vmax=1)
                 axes_joint[row, col].set_adjustable('box')
                 axes_joint[row, col].imshow(recon_to_show, vmin=0, vmax=1, alpha=0.5)
 
-            fig_im.savefig(os.path.join(imputations_dir, 'batched_imputations_{}.png'.format(step)))
-            fig_gt.savefig(os.path.join(gt_dir, 'batched_gt_{}.png'.format(step)))
             fig_joint.savefig(os.path.join(joint_dir, 'join_gt_im_{}.png'.format(step)))
 
+            png_files.append(os.path.join(joint_dir, 'join_gt_im_{}.png'.format(step)))
+
             plt.close()
+        
+        path_out = os.path.join(root_dir, 'trajectories.mp4')
+        clip = ImageSequenceClip(png_files, fps=10)
+        clip.write_videofile(path_out, codec="libx264")
+
 
 
 def main(args):
@@ -351,6 +442,8 @@ def main(args):
     print('TRAIN: ', args.train)
     print('TEST: ', args.test)
     print('USE_MLP: ', args.use_MLP)
+    print('A_init: ', args.A_init)
+    print('C_init: ', args.C_init)
     print('########################################')
 
     # load data
@@ -380,6 +473,8 @@ def main(args):
                      args.dim_z, 
                      args.K, 
                      T=T, 
+                     A_init=args.A_init, 
+                     C_init=args.C_init,
                      recon_scale=args.recon_scale,
                      use_bernoulli=args.use_bernoulli,
                      use_MLP=args.use_MLP,
@@ -426,6 +521,8 @@ def main(args):
                                     "grad-clipping": args.use_grad_clipping,
                                     "a-dimensions": args.dim_a, 
                                     "z-dimensions": args.dim_z, 
+                                    "A_init": args.A_init, 
+                                    "C_init": args.C_init,
                                     "number-of-dynamics-K": args.K,
                                     "reconstruction-weight": args.recon_scale,
                                     "use_bernoulli": args.use_bernoulli,
@@ -442,7 +539,7 @@ def main(args):
             if epoch >= args.n_epoch_initial:
                 train_dyn_net = True
 
-            # TRAIN 
+            # training
             loss_train, loss_dict, _ = train(train_loader=train_loader, 
                                              kvae=kvae, 
                                              optimizer=optimizer, 
@@ -461,8 +558,8 @@ def main(args):
             print(log)
             log_list.append(log + '\n')
 
-            # VALID  
-            output_folder = os.path.join(save_filename, '', 'validation', '', 'epoch_{}'.format(str(epoch)))
+            # validation  
+            output_folder = os.path.join(save_filename, '', 'validation', '', 'reconstructions', '', 'epoch_{}'.format(str(epoch)))
             if not os.path.exists('{}'.format(output_folder)):
                 os.makedirs(output_folder)
             test_reconstruction(test_loader=test_loader, 
@@ -470,6 +567,58 @@ def main(args):
                                 output_folder=output_folder, 
                                 args=args, 
                                 dtype=dtype)
+
+            # dynamics visualization
+            if epoch % 10 == 0 and epoch > 0:
+                fractions = [0.3, 0.5, 0.9]
+                consecutive_masking = True
+                for masking_fraction in fractions:
+                    mask = [1] * T
+                    n_of_samples_to_mask = int((T - 8)*masking_fraction)
+                    if consecutive_masking:
+                        to_zero = np.arange(int(T/2) - int(n_of_samples_to_mask/2), int(T/2) + int(n_of_samples_to_mask/2), 1)
+                    else:
+                        to_zero = random.sample(range(4, T-4), n_of_samples_to_mask)
+                    for mask_idx in range(len(mask)):
+                        if mask_idx in to_zero:
+                            mask[mask_idx] = 0
+                    output_folder = os.path.join(save_filename, '', 'validation', '', 'dynamics', '', 'epoch_{}'.format(str(epoch)), 'mask_{}'.format(int(masking_fraction*100)))
+                    if consecutive_masking:
+                        output_folder = os.path.join(output_folder, '', 'consecutive')
+                    else:
+                        output_folder = os.path.join(output_folder, '', 'random')
+                    if not os.path.isdir(output_folder):
+                        os.makedirs(output_folder)
+                    print('Plotting Imputation ...')
+                    video_paths = plot(test_dl=test_dl, 
+                                    kvae=kvae, 
+                                    mask=mask, 
+                                    output_folder=output_folder, 
+                                    args=args, 
+                                    which='imputation',
+                                    dtype=dtype, 
+                                    single_plots=True,
+                                    training=False, 
+                                    n_samples_to_plot=2, 
+                                    device=args.device, 
+                                    return_paths=True)
+                    
+                    if len(video_paths) > 0:
+                        for n, video_path in enumerate(video_paths):
+                            video = wandb.Video(
+                            video_path,
+                            f"idx_{n}_mask_length_{n_of_samples_to_mask}",
+                            fps=10,
+                            format="avi",
+                            )
+
+                            video_log = {"video": video,
+                                        "batch_id": 0,
+                                        "data_idx": n,
+                                        "mask_length": n_of_samples_to_mask}
+
+                            wandb.log(video_log)
+
 
             # save checkpoints 
             if epoch % 10 == 0 or epoch == args.num_epochs-1:
@@ -488,6 +637,7 @@ def main(args):
             path_to_dir = args.kvae_model.split('/')[:-1]
             save_filename = "/".join(path_to_dir) 
         
+
         #### RECONSTRUCTION
         if args.test_reconstruction:
             output_folder = os.path.join(save_filename, '', 'reconstructions')
@@ -499,13 +649,18 @@ def main(args):
                                 args=args, 
                                 dtype=dtype)
         
+
         #### IMPUTATION 
         mask = [1] * T
         n_of_samples_to_mask = int((T - 8)*args.masking_fraction)
-        to_zero = random.sample(range(4, T-4), n_of_samples_to_mask)
+        if args.consecutive_masking:
+            to_zero = np.arange(int(T/2) - int(n_of_samples_to_mask/2), int(T/2) + int(n_of_samples_to_mask/2), 1)
+        else:
+            to_zero = random.sample(range(4, T-4), n_of_samples_to_mask)
         for mask_idx in range(len(mask)):
             if mask_idx in to_zero:
                 mask[mask_idx] = 0
+
         if args.test_imputation:
             output_folder = os.path.join(save_filename, '', 'imputations_{}'.format(str(int(args.masking_fraction*100))))
             if not os.path.exists('{}'.format(output_folder)):
@@ -517,8 +672,13 @@ def main(args):
                              output_folder=output_folder, 
                              args=args, 
                              dtype=dtype)
+        
         if args.plot_imputation:
             output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'mask_{}'.format(int(args.masking_fraction*100)))
+            if args.consecutive_masking:
+                output_folder = os.path.join(output_folder, '', 'consecutive')
+            else:
+                output_folder = os.path.join(output_folder, '', 'random')
             if not os.path.isdir(output_folder):
                 os.makedirs(output_folder)
             print('Plotting Imputation ...')
@@ -528,8 +688,10 @@ def main(args):
                  output_folder=output_folder, 
                  args=args, 
                  which='imputation',
-                 dtype=dtype)
+                 dtype=dtype, 
+                 single_plots=args.plot_trajectories)
         
+
         #### GENERATION
         if args.test_generation:
             mask = [1] * args.n_of_frame_to_generate
@@ -547,6 +709,7 @@ def main(args):
                             output_folder=output_folder, 
                             args=args, 
                             dtype=dtype)
+        
         if args.plot_generation:
             output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'generations')
             if not os.path.isdir(output_folder):
@@ -577,6 +740,12 @@ if __name__ == '__main__':
         help='training with masked sequences')
     parser.add_argument('--use_double', type=int, default=1, 
         help='train with dtype=float64')
+    
+    # initialization parameters
+    parser.add_argument('--A_init', type=float, default=1.,
+        help='initialization weight for random component')
+    parser.add_argument('--C_init', type=float, default=0.,
+        help='initialization weight for random component')
 
     # encoder parameters
     parser.add_argument('--dim_a', type=int, default=2,
@@ -623,18 +792,28 @@ if __name__ == '__main__':
     # testing parameters
     parser.add_argument('--test', type=int, default=None,
         help='test model')
-    parser.add_argument('--test_reconstruction', type=int, default=1,
+    parser.add_argument('--test_reconstruction', type=int, default=0,
         help='test model reconstruction')
-    parser.add_argument('--test_imputation', type=int, default=1,
+    
+    # test imputation
+    parser.add_argument('--test_imputation', type=int, default=0,
         help='test model imputation')
     parser.add_argument('--plot_imputation', type=int, default=1,
         help='plot model imputation')
     parser.add_argument('--masking_fraction', type=float, default=0.3, 
         help='fraction fo sample being masked for testing imputation')
-    parser.add_argument('--test_generation', type=int, default=1, 
+    parser.add_argument('--consecutive_masking', type=int, default=0, 
+        help='decide whether masking is done on consecutive frames')
+    parser.add_argument('--plot_trajectories', type=int, default=1, 
+        help='decide whether to plot trajectories or batch_plots')
+    
+    # test generation
+    parser.add_argument('--test_generation', type=int, default=0, 
         help='test model generation')
-    parser.add_argument('--plot_generation', type=int, default=1,
+    parser.add_argument('--plot_generation', type=int, default=0,
         help='plot model generation')
+    parser.add_argument('--n_of_starting_frames', type=int, default=50, 
+        help='number of sample we want to generate from')
     parser.add_argument('--n_of_frame_to_generate', type=int, default=50, 
         help='number of sample we want to generate')
 
