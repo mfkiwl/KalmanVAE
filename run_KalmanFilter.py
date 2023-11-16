@@ -126,7 +126,8 @@ ax3.set_ylim([3,15])
 ax3.legend(loc='upper right')
 ax3.title.set_text('Kalman Smoothing')
 
+fig_sum.savefig('/data2/users/lr4617/KalmanVAE/results/KalmanFilter/kalman_filter_all_2.png')
 fig_sum.savefig('/vol/bitbucket/lr4617/kalman_filter_all_2.png')
 
 
-print(os.path.isfile('/data2/users/lr4617/Kalman_VAE/results/kalman_filter_all_2.png'))
+print(os.path.isfile('/data2/users/lr4617/KalmanVAE/results/KalmanFilter/kalman_filter_all_2.png'))

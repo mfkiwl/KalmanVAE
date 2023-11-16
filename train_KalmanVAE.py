@@ -32,7 +32,7 @@ def plot_dynamics(alphas, output_folder, n_samples=5):
 
         fig.savefig(output_folder + 'dyn_bars_{}.png'.format(n_sample))
 
-def train(train_loader, kvae, optimizer, train_dyn_net, args, dtype, upscale_vae_loss, use_mean):
+def train(train_loader, kvae, optimizer, train_dyn_net, args, dtype, upscale_vae_loss, use_mean, output_folder):
 
     loss_epoch = 0.
     idv_losses = {'reconstruction loss': 0,
@@ -50,10 +50,28 @@ def train(train_loader, kvae, optimizer, train_dyn_net, args, dtype, upscale_vae
         sample = sample > 0.5
         sample = sample.to(dtype).to('cuda:' + str(args.device))
 
-        _, alpha, loss, loss_dict = kvae.calculate_loss(sample, 
-                                                        train_dyn_net=train_dyn_net, 
-                                                        upscale_vae_loss=upscale_vae_loss, 
-                                                        use_mean=use_mean)
+        obs, alpha, loss, loss_dict = kvae.calculate_loss(sample, 
+                                                          train_dyn_net=train_dyn_net, 
+                                                          upscale_vae_loss=upscale_vae_loss, 
+                                                          use_mean=use_mean)
+
+        if n == 1:
+            a_sample, filtered_means, smoothed_means, C = obs
+            a_sample = a_sample.detach()
+            C = C.detach()
+
+            filtered_obs = torch.matmul(C, torch.stack(filtered_means).permute(1,0,2).unsqueeze(-1)).squeeze(-1).detach().cpu().numpy()
+            smoothed_obs = torch.matmul(C, torch.stack(smoothed_means).permute(1,0,2).unsqueeze(-1)).squeeze(-1).detach().cpu().numpy()
+            gt_obs = a_sample.view(sample.size(0), sample.size(1), -1).cpu().numpy()
+
+            for i in range(5):
+                fig = plt.figure()
+                plt.plot(gt_obs[i, :, 0], gt_obs[i, :, 1], ".-", color='black', label='Ground-Truth')
+                plt.plot(filtered_obs[i, :, 0], filtered_obs[i, :, 1], ".-", color='blue', label='Filtered')
+                plt.plot(smoothed_obs[i, :, 0], smoothed_obs[i, :, 1], ".-", color='orange', label='Smoothed')
+                plt.legend()
+                plt.grid()
+                fig.savefig(os.path.join(output_folder, 'trajectory_{}.png'.format(i)))
 
         loss.backward()
         optimizer.step()
@@ -252,123 +270,127 @@ def plot(test_dl, kvae, mask, output_folder, args, which, dtype, single_plots=Fa
         
         video_paths = []
 
-        for sample_n in range(n_samples_to_plot):
+        kvae.eval()
+        with torch.no_grad():
 
-            # get sample
-            sample = test_dl[sample_n]
-            sample = sample > 0.5
-            batched_sample = torch.Tensor(sample).unsqueeze(0).to(dtype).to('cuda:{}'.format(device))
+            print(mask)
 
-            # get imputations
-            if which == 'imputation':
-                imputed_seq, imputed_filtered_seq, alpha, filtered_obs, smoothed_obs, gt_smoothed_obs = kvae.impute(batched_sample, mask)
-                filtered_obs = filtered_obs.squeeze(-1).cpu()
-                smoothed_obs = smoothed_obs.squeeze(-1).cpu()
-                gt_smoothed_obs = gt_smoothed_obs.squeeze(-1).cpu()
-            
-            f_max = filtered_obs.max()
-            f_min = filtered_obs.min()
+            for sample_n in range(40, n_samples_to_plot + 40):
 
-            s_max = smoothed_obs.max()
-            s_min = smoothed_obs.min()
+                # get sample
+                sample = test_dl[sample_n]
+                sample = sample > 0.5
+                batched_sample = torch.Tensor(sample).unsqueeze(0).to(dtype).to('cuda:{}'.format(device))
 
-            gt_max = gt_smoothed_obs.max()
-            gt_min= gt_smoothed_obs.min()
-
-            max_obs_vals = max([f_max, s_max, gt_max])
-            min_obs_vals = min([f_min, s_min, gt_min])
-
-            sample_dir = os.path.join(root_dir, 'sample_{}'.format(sample_n), '')
-            if not os.path.isdir(sample_dir):
-                os.makedirs(sample_dir)
-            frames_dir = os.path.join(sample_dir, '', 'filt_vs_smooth')
-            if not os.path.isdir(frames_dir):
-                os.makedirs(frames_dir)
-
-            png_files = []
-
-            # for visualization purposes
-            cmap = plt.get_cmap("tab10")
-            batched_sample = batched_sample < 0.5
-            batched_sample = batched_sample.float()
-            imputed_seq = imputed_seq < 0.5
-            imputed_seq = imputed_seq.float()
-            imputed_filtered_seq = imputed_filtered_seq < 0.5
-            imputed_filtered_seq = imputed_filtered_seq.float()
-
-            path_out = os.path.join(sample_dir, 'trajectories.mp4')
-
-            if training:
-                video_paths.append(path_out)
-
-            if training:
-                fourcc = cv2.VideoWriter_fourcc(*"mp4")
-                frame_size = (1600, 400)
-                fps = 10
-                video = cv2.VideoWriter(path_out, fourcc, fps, frame_size)
-
-            for t in range(batched_sample.size(1)):
-                fig, axes = plt.subplots(nrows=1, ncols=4, figsize=(16, 4))
-                fig.suptitle(f"$t = {t}$")
-
-                bg_ch = batched_sample[0, t, 0].cpu().unsqueeze(-1).repeat(1, 1, 2)
-                r_ch = torch.ones(batched_sample[0, t, 0].size(0), batched_sample[0, t, 0].size(0), 1)
-                gt_to_show = torch.cat([r_ch, bg_ch], dim=2)
-
-                im_s_to_show = imputed_seq[0, t, 0].unsqueeze(-1).repeat(1, 1, 3).float().detach().cpu().numpy()
-                im_f_to_show = imputed_filtered_seq[0, t, 0].unsqueeze(-1).repeat(1, 1, 3).float().detach().cpu().numpy()
-
-
-                axes[0].imshow(gt_to_show, vmin=0, vmax=1)
-                axes[0].imshow(im_s_to_show, vmin=0, vmax=1, alpha=0.5)
-                axes[0].set_adjustable('box') 
-                axes[0].set_title(r"imputation smoothed $\mathbf{x}_t$")
-
-                axes[1].imshow(gt_to_show, vmin=0, vmax=1)
-                axes[1].imshow(im_f_to_show, vmin=0, vmax=1, alpha=0.5)
-                axes[1].set_adjustable('box') 
-                axes[1].set_title(r"imputation filtered $\mathbf{x}_t$")
-
-                axes[2].bar(["0", "1", "2"], alpha[0, t, :].detach().cpu().numpy())
-                axes[2].set_ylim(0, 1)
-                axes[2].set_title(r"weight $\mathbf{k}_t$")
-
-                pos_img = axes[0].get_position()
-                pos_bar = axes[2].get_position()
-                axes[2].set_position([pos_bar.x0, pos_img.y0, pos_bar.width, pos_img.height])
-
-                axes[3].plot(filtered_obs[0, 0:t, 0], filtered_obs[0, 0:t, 1], ".-", color=cmap(0), label='Filtered')
-                axes[3].plot(smoothed_obs[0, 0:t, 0], smoothed_obs[0, 0:t, 1],".-", color=cmap(1), label='Smoothed')
-                axes[3].plot(gt_smoothed_obs[0, 0:t, 0], gt_smoothed_obs[0, 0:t, 1], ".-", color="black", label='Ground-Truth')
-                axes[3].set_xlim([min_obs_vals, max_obs_vals])
-                axes[3].set_ylim([min_obs_vals, max_obs_vals])
-                axes[3].legend()
-                axes[3].grid()
+                # get imputations
+                if which == 'imputation':
+                    imputed_seq, imputed_filtered_seq, alpha, filtered_obs, smoothed_obs, gt_smoothed_obs = kvae.impute(batched_sample, mask)
+                    filtered_obs = filtered_obs.squeeze(-1).cpu()
+                    smoothed_obs = smoothed_obs.squeeze(-1).cpu()
+                    gt_smoothed_obs = gt_smoothed_obs.squeeze(-1).cpu()
                 
-                plt.tight_layout()
+                f_max = filtered_obs.max()
+                f_min = filtered_obs.min()
+
+                s_max = smoothed_obs.max()
+                s_min = smoothed_obs.min()
+
+                gt_max = gt_smoothed_obs.max()
+                gt_min= gt_smoothed_obs.min()
+
+                max_obs_vals = max([f_max, s_max, gt_max])
+                min_obs_vals = min([f_min, s_min, gt_min])
+
+                sample_dir = os.path.join(root_dir, 'sample_{}'.format(sample_n), '')
+                if not os.path.isdir(sample_dir):
+                    os.makedirs(sample_dir)
+                frames_dir = os.path.join(sample_dir, '', 'filt_vs_smooth')
+                if not os.path.isdir(frames_dir):
+                    os.makedirs(frames_dir)
+
+                png_files = []
+
+                # for visualization purposes
+                cmap = plt.get_cmap("tab10")
+                batched_sample = batched_sample < 0.5
+                batched_sample = batched_sample.float()
+                imputed_seq = imputed_seq < 0.5
+                imputed_seq = imputed_seq.float()
+                imputed_filtered_seq = imputed_filtered_seq < 0.5
+                imputed_filtered_seq = imputed_filtered_seq.float()
+
+                path_out = os.path.join(sample_dir, 'trajectories.mp4')
 
                 if training:
-                    canvas = FigureCanvas(fig)
-                    canvas.draw()
-                    matplotlib_image = np.array(canvas.renderer.buffer_rgba())
-                    opencv_image = cv2.cvtColor(matplotlib_image, cv2.COLOR_RGBA2BGR)
-                    video.write(opencv_image)
-                
+                    video_paths.append(path_out)
+
+                if training:
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4")
+                    frame_size = (1600, 400)
+                    fps = 10
+                    video = cv2.VideoWriter(path_out, fourcc, fps, frame_size)
+
+                for t in range(batched_sample.size(1)):
+                    fig, axes = plt.subplots(nrows=1, ncols=4, figsize=(16, 4))
+                    fig.suptitle(f"$t = {t}$")
+
+                    bg_ch = batched_sample[0, t, 0].cpu().unsqueeze(-1).repeat(1, 1, 2)
+                    r_ch = torch.ones(batched_sample[0, t, 0].size(0), batched_sample[0, t, 0].size(0), 1)
+                    gt_to_show = torch.cat([r_ch, bg_ch], dim=2)
+
+                    im_s_to_show = imputed_seq[0, t, 0].unsqueeze(-1).repeat(1, 1, 3).float().detach().cpu().numpy()
+                    im_f_to_show = imputed_filtered_seq[0, t, 0].unsqueeze(-1).repeat(1, 1, 3).float().detach().cpu().numpy()
+
+                    axes[0].imshow(gt_to_show, vmin=0, vmax=1)
+                    axes[0].imshow(im_s_to_show, vmin=0, vmax=1, alpha=0.5)
+                    axes[0].set_adjustable('box') 
+                    axes[0].set_title(r"imputation smoothed $\mathbf{x}_t$")
+
+                    axes[1].imshow(gt_to_show, vmin=0, vmax=1)
+                    axes[1].imshow(im_f_to_show, vmin=0, vmax=1, alpha=0.5)
+                    axes[1].set_adjustable('box') 
+                    axes[1].set_title(r"imputation filtered $\mathbf{x}_t$")
+
+                    axes[2].bar(["0", "1", "2"], alpha[0, t, :].detach().cpu().numpy())
+                    axes[2].set_ylim(0, 1)
+                    axes[2].set_title(r"weight $\mathbf{k}_t$")
+
+                    pos_img = axes[0].get_position()
+                    pos_bar = axes[2].get_position()
+                    axes[2].set_position([pos_bar.x0, pos_img.y0, pos_bar.width, pos_img.height])
+
+                    axes[3].plot(filtered_obs[0, 0:t, 0], filtered_obs[0, 0:t, 1], ".-", color=cmap(0), label='Filtered')
+                    axes[3].plot(smoothed_obs[0, 0:t, 0], smoothed_obs[0, 0:t, 1],".-", color=cmap(1), label='Smoothed')
+                    axes[3].plot(gt_smoothed_obs[0, 0:t, 0], gt_smoothed_obs[0, 0:t, 1], ".-", color="black", label='Ground-Truth')
+                    axes[3].set_xlim([min_obs_vals, max_obs_vals])
+                    axes[3].set_ylim([min_obs_vals, max_obs_vals])
+                    axes[3].legend()
+                    axes[3].grid()
+                    
+                    plt.tight_layout()
+
+                    if training:
+                        canvas = FigureCanvas(fig)
+                        canvas.draw()
+                        matplotlib_image = np.array(canvas.renderer.buffer_rgba())
+                        opencv_image = cv2.cvtColor(matplotlib_image, cv2.COLOR_RGBA2BGR)
+                        video.write(opencv_image)
+                    
+                    else:
+                        fig.savefig(os.path.join(frames_dir, 'visualization-{}.png'.format(t)))
+                        png_files.append(os.path.join(frames_dir, 'visualization-{}.png'.format(t)))
+
+                    plt.close(fig)
+
+                if training:
+                    video.release()
+
                 else:
-                    fig.savefig(os.path.join(frames_dir, 'visualization-{}.png'.format(t)))
-                    png_files.append(os.path.join(frames_dir, 'visualization-{}.png'.format(t)))
-
-                plt.close(fig)
-
-            if training:
-                video.release()
-
-            else:
-                clip = ImageSequenceClip(png_files, fps=10)
-                clip.write_videofile(path_out, codec="libx264")
-        
-        if return_paths:
-            return video_paths
+                    clip = ImageSequenceClip(png_files, fps=10)
+                    clip.write_videofile(path_out, codec="libx264")
+            
+            if return_paths:
+                return video_paths
 
     else:
         # show 16 sequences in the same plot    
@@ -382,57 +404,59 @@ def plot(test_dl, kvae, mask, output_folder, args, which, dtype, single_plots=Fa
         joint_dir = os.path.join(root_dir, '', name_joint)
         if not os.path.isdir(joint_dir):
             os.makedirs(joint_dir)
-
-        imgs_to_show = 16
-        batched_sample = torch.Tensor(test_dl).to('cuda:0')
-        batched_sample = batched_sample > 0.5
-        batched_sample = batched_sample.to(dtype)
-
-        if which == 'imputation':
-            x_hat, _ = kvae.impute(batched_sample[:imgs_to_show], mask)
-        else:
-            x_hat = kvae.generate(batched_sample[:imgs_to_show], mask)
         
-        png_files = []
+        kvae.eval()
+        with torch.no_grad():
 
-        for step in range(batched_sample.size(1)):
-            
-            image = batched_sample[:, step, :, :, :].squeeze(1).cpu()
-            reconstruction = x_hat[:, step, :, :, :].detach().squeeze(1).cpu()
+            imgs_to_show = 16
+            batched_sample = torch.Tensor(test_dl).to('cuda:{}'.format(device))
+            batched_sample = batched_sample > 0.5
+            batched_sample = batched_sample.to(dtype)
 
-            fig_joint, axes_joint = plt.subplots(nrows=4, ncols=4, figsize=(15, 15))
-            if args.consecutive_masking:
-                fig_joint.suptitle("Masking {}% - {}".format(int(args.masking_fraction*100), "Consecutive"))
+            if which == 'imputation':
+                x_hat, _ = kvae.impute(batched_sample[:imgs_to_show], mask)
             else:
-                fig_joint.suptitle("Masking {}% - {}".format(int(args.masking_fraction*100), "Random"))
+                x_hat = kvae.generate(batched_sample[:imgs_to_show], mask)
+            
+            png_files = []
 
-            image = image < 0.5
-            reconstruction = reconstruction < 0.5
+            for step in range(batched_sample.size(1)):
+                
+                image = batched_sample[:, step, :, :, :].squeeze(1).cpu()
+                reconstruction = x_hat[:, step, :, :, :].detach().squeeze(1).cpu()
 
-            for sample_n in range(imgs_to_show):
+                fig_joint, axes_joint = plt.subplots(nrows=4, ncols=4, figsize=(15, 15))
+                if args.consecutive_masking:
+                    fig_joint.suptitle("Masking {}% - {}".format(int(args.masking_fraction*100), "Consecutive"))
+                else:
+                    fig_joint.suptitle("Masking {}% - {}".format(int(args.masking_fraction*100), "Random"))
 
-                row = int(sample_n/4)
-                col = sample_n%4
+                image = image < 0.5
+                reconstruction = reconstruction < 0.5
 
-                bg_ch = image[sample_n].unsqueeze(-1).repeat(1, 1, 2)
-                r_ch = torch.ones(image[sample_n].size(0), image[sample_n].size(0), 1)
-                img_to_show = torch.cat([r_ch, bg_ch], dim=2)
-                recon_to_show = reconstruction[sample_n].unsqueeze(-1).repeat(1, 1, 3).float().numpy()
+                for sample_n in range(imgs_to_show):
 
-                axes_joint[row, col].imshow(img_to_show, vmin=0, vmax=1)
-                axes_joint[row, col].set_adjustable('box')
-                axes_joint[row, col].imshow(recon_to_show, vmin=0, vmax=1, alpha=0.5)
+                    row = int(sample_n/4)
+                    col = sample_n%4
 
-            fig_joint.savefig(os.path.join(joint_dir, 'join_gt_im_{}.png'.format(step)))
+                    bg_ch = image[sample_n].unsqueeze(-1).repeat(1, 1, 2)
+                    r_ch = torch.ones(image[sample_n].size(0), image[sample_n].size(0), 1)
+                    img_to_show = torch.cat([r_ch, bg_ch], dim=2)
+                    recon_to_show = reconstruction[sample_n].unsqueeze(-1).repeat(1, 1, 3).float().numpy()
 
-            png_files.append(os.path.join(joint_dir, 'join_gt_im_{}.png'.format(step)))
+                    axes_joint[row, col].imshow(img_to_show, vmin=0, vmax=1)
+                    axes_joint[row, col].set_adjustable('box')
+                    axes_joint[row, col].imshow(recon_to_show, vmin=0, vmax=1, alpha=0.5)
 
-            plt.close()
-        
-        path_out = os.path.join(root_dir, 'trajectories.mp4')
-        clip = ImageSequenceClip(png_files, fps=10)
-        clip.write_videofile(path_out, codec="libx264")
+                fig_joint.savefig(os.path.join(joint_dir, 'join_gt_im_{}.png'.format(step)))
 
+                png_files.append(os.path.join(joint_dir, 'join_gt_im_{}.png'.format(step)))
+
+                plt.close()
+            
+            path_out = os.path.join(root_dir, 'trajectories.mp4')
+            clip = ImageSequenceClip(png_files, fps=10)
+            clip.write_videofile(path_out, codec="libx264")
 
 
 def main(args):
@@ -540,6 +564,9 @@ def main(args):
                 train_dyn_net = True
 
             # training
+            output_folder = os.path.join(save_filename, '', 'training', '', 'trajectories', '', 'epoch_{}'.format(str(epoch)))
+            if not os.path.exists('{}'.format(output_folder)):
+                os.makedirs(output_folder)
             loss_train, loss_dict, _ = train(train_loader=train_loader, 
                                              kvae=kvae, 
                                              optimizer=optimizer, 
@@ -547,7 +574,8 @@ def main(args):
                                              args=args, 
                                              dtype=dtype, 
                                              upscale_vae_loss=args.upscale_vae_loss, 
-                                             use_mean=args.use_mean)
+                                             use_mean=args.use_mean, 
+                                             output_folder=output_folder)
             if args.use_wandb:
                 run.log(loss_dict)
             if epoch % 20 == 0 and epoch > 0:

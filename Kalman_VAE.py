@@ -66,18 +66,18 @@ class KalmanVAE(nn.Module):
             self.encoder = Gaussian_Encoder(channels_in=n_channels_in, 
                                             image_size=image_size, 
                                             latent_dim=self.dim_a, 
-                                            n_channels=[16])
+                                            n_channels=[16, 32])
             if use_bernoulli:
                 self.decoder = Bernoulli_Decoder(channels_in=n_channels_in, 
                                                 image_size=image_size, 
                                                 latent_dim=self.dim_a, 
-                                                n_channels=[16])
+                                                n_channels=[16, 32])
             else:
                 self.decoder = Gaussian_Decoder(channels_in=n_channels_in, 
                                             image_size=image_size, 
                                             latent_dim=self.dim_a,
                                             out_var=self.x_var, 
-                                            n_channels=[16])
+                                            n_channels=[16, 32])
 
     def calculate_loss(self, x, train_dyn_net=True, upscale_vae_loss=True, use_mean=False, recon_only=False):
         
@@ -107,12 +107,12 @@ class KalmanVAE(nn.Module):
 
             # encode samples i.e get q_{phi} (a|x)
             a_dist = self.encoder(x.view(-1, *x.shape[2:])) 
-            a_sample = a_dist.rsample().view(batch_size, seq_len, self.dim_a)
+            a_sample = a_dist.rsample().view(batch_size, seq_len, self.dim_a) # (bs, T, dim_a)
 
             # get reconstruction i.e. get p_{theta} (x|a)
             if self.use_bernoulli:
                 x_dist = self.decoder(a_sample.view(-1, self.dim_a))
-                x_hat = x_dist.mean
+                x_hat = x_dist.mean # (bs, T, n_ch, dim, dim)
             else:
                 x_hat, x_mean = self.decoder(a_sample)
             if recon_only:
@@ -123,7 +123,7 @@ class KalmanVAE(nn.Module):
         params = self.kalman_filter.filter(a_sample, 
                                            train_dyn_net=train_dyn_net, 
                                            imputation_idx=None)
-        _, _, _, _, _, _, A, C, alpha = params
+        _, _, filtered_means, _, _, _, A, C, alpha = params
         smoothed_means, smoothed_covariances = self.kalman_filter.smooth(a_sample, params)
 
 
@@ -135,12 +135,11 @@ class KalmanVAE(nn.Module):
         #### VAE - part
         if self.train_VAE:
             #### q_{phi} (a|x)
-            #a_dist = Normal(loc=a_mean, scale=a_std)
             log_q_a_given_x = a_dist.log_prob(a_sample.view(-1, self.dim_a)).view(batch_size, seq_len, self.dim_a)
             if upscale_vae_loss:
                 log_q_a_given_x = log_q_a_given_x.sum(-1).sum(-1).sum()
             elif use_mean:
-                log_q_a_given_x = log_q_a_given_x.mean(1).mean(0).sum()
+                log_q_a_given_x = log_q_a_given_x.sum(-1).mean(1).mean(0)
             else:
                 log_q_a_given_x = log_q_a_given_x.sum(-1).sum(-1).mean()
             
@@ -150,7 +149,7 @@ class KalmanVAE(nn.Module):
                 if upscale_vae_loss:
                     log_p_x_given_a = x_dist.log_prob(x.reshape(-1, *x.shape[2:])).view(batch_size, seq_len, -1).sum(-1).sum(-1).sum()
                 elif use_mean:
-                    log_p_x_given_a = x_dist.log_prob(x.reshape(-1, *x.shape[2:])).view(batch_size, seq_len, -1).mean(1).mean(0).sum()
+                    log_p_x_given_a = x_dist.log_prob(x.reshape(-1, *x.shape[2:])).view(batch_size, seq_len, -1).sum(-1).mean(1).mean(0)
                 else:
                     log_p_x_given_a = x_dist.log_prob(x.reshape(-1, *x.shape[2:])).view(batch_size, seq_len, -1).sum(-1).sum(-1).mean()
             else:
@@ -186,20 +185,29 @@ class KalmanVAE(nn.Module):
         else:
             log_p_a_given_z = p_a_given_z.log_prob(a_sample).sum(1).mean()
 
-        #### p_{gamma} (z_T|z_T-1, .., z_1) 
-        z_transition = torch.matmul(A[:, 1:, :], z_sample[:, :-1, :].unsqueeze(-1)).squeeze(-1)
-        # to_sample = z_sample[:, 1:, :] - z_transition
-        p_zT_given_zt = MultivariateNormal(loc=z_transition, 
-                                           scale_tril=torch.linalg.cholesky(self.kalman_filter.Q.repeat(batch_size, seq_len - 1, 1, 1)))
-        if use_mean:
-            log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample[:, 1:, :]).mean(1).mean()
-        else:
-            log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample[:, 1:, :]).sum(1).mean()
+        #### p_{gamma} (z_T|z_T-1, .., z_0) 
+        z_transition_mean = torch.cat(
+            [
+                self.kalman_filter.mu.repeat(batch_size, 1, 1),
+                torch.matmul(A[:, 1:, :], z_sample[:, :-1, :].unsqueeze(-1)).squeeze(-1)
+            ], 
+            dim=1
+        )
 
-        #### p_{gamma} (z_0)
-        p_z0 = MultivariateNormal(loc=self.kalman_filter.mu.repeat(batch_size, 1), 
-                                  scale_tril=torch.linalg.cholesky(self.kalman_filter.sigma.repeat(batch_size, 1, 1)))
-        log_p_z0 = p_z0.log_prob(z_sample[:, 0, :]).mean(0)
+        z_transition_cov = torch.cat(
+            [
+                self.kalman_filter.sigma.repeat(batch_size, 1, 1, 1), 
+                self.kalman_filter.Q.repeat(batch_size, seq_len - 1, 1, 1)
+            ], 
+            dim=1
+        )
+
+        p_zT_given_zt = MultivariateNormal(loc=z_transition_mean, 
+                                           scale_tril=torch.linalg.cholesky(z_transition_cov))
+        if use_mean:
+            log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample).mean(1).mean()
+        else:
+            log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample).sum(1).mean()
 
         #### p_{gamma} (z|a)
         if use_mean:
@@ -212,10 +220,10 @@ class KalmanVAE(nn.Module):
             loss_dict = {'reconstruction loss': self.recon_scale*log_p_x_given_a.detach().cpu().numpy(),
                         'encoder loss': log_q_a_given_x.detach().cpu().numpy(), 
                         'LGSSM observation log likelihood': log_p_a_given_z.detach().cpu().numpy(),
-                        'LGSSM tranisition log likelihood': log_p_zT_given_zt.detach().cpu().numpy() + log_p_z0.detach().cpu().numpy(), 
+                        'LGSSM tranisition log likelihood': log_p_zT_given_zt.detach().cpu().numpy(),
                         'LGSSM tranisition log posterior': log_p_z_given_a.detach().cpu().numpy()}
 
-            return x_hat, alpha, -self.recon_scale*log_p_x_given_a + log_q_a_given_x + log_p_z_given_a - log_p_a_given_z - log_p_zT_given_zt - log_p_z0, loss_dict
+            return [a_sample, filtered_means, smoothed_means, C], alpha, -self.recon_scale*log_p_x_given_a + log_q_a_given_x + log_p_z_given_a - log_p_a_given_z - log_p_zT_given_zt, loss_dict
         else:
             loss_dict = {'LGSSM observation log likelihood': log_p_a_given_z.detach().cpu().numpy(),
                         'LGSSM tranisition log likelihood': log_p_zT_given_zt.detach().cpu().numpy() + log_p_z0.detach().cpu().numpy(), 
@@ -327,3 +335,18 @@ class KalmanVAE(nn.Module):
             generated_data, _ = self.decoder(a_sample.view(batch_size*len(mask), -1))
 
         return generated_data.view(batch_size, len(mask), *x.shape[2:])   
+    
+
+'''
+p_zT_given_zt = MultivariateNormal(loc=z_transition, 
+                                    scale_tril=torch.linalg.cholesky(self.kalman_filter.Q.repeat(batch_size, seq_len - 1, 1, 1)))
+if use_mean:
+    log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample[:, 1:, :]).mean(1).mean()
+else:
+    log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample[:, 1:, :]).sum(1).mean()
+
+#### p_{gamma} (z_0)
+p_z0 = MultivariateNormal(loc=self.kalman_filter.mu.repeat(batch_size, 1), 
+                            scale_tril=torch.linalg.cholesky(self.kalman_filter.sigma.repeat(batch_size, 1, 1)))
+log_p_z0 = p_z0.log_prob(z_sample[:, 0, :]).mean(0)
+'''

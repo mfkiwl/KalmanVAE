@@ -64,7 +64,7 @@ class Kalman_Filter(nn.Module):
                  mlp_dim=128, 
                  symmetric_covariance=True,
                  dtype=torch.float32, 
-                 device=None):
+                 device=-1):
 
         super(Kalman_Filter, self).__init__()
         
@@ -161,7 +161,7 @@ class Kalman_Filter(nn.Module):
         if self.use_KVAE:
             A, C, alpha = self.compute_transition_matrices(a, train_dyn_net, imputation_idx)
         
-        if self.device is not None:
+        if self.device != -1:
             self.R = self.R.to(self.device)
             self.Q = self.Q.to(self.device)
         
@@ -197,7 +197,7 @@ class Kalman_Filter(nn.Module):
             # update covariance
             KC = torch.matmul(K, C[:, t_step, :, :])
             I = torch.eye(self.dim_z).repeat(bs, 1, 1)
-            if self.device is not None:
+            if self.device != -1:
                 I = I.to(self.device)
             sigma = torch.matmul((I - KC), sigma_pred)
 
@@ -219,7 +219,7 @@ class Kalman_Filter(nn.Module):
         if self.use_KVAE:
             return mu, sigma, means, covariances, next_means, next_covariances, A, C, alpha
         else:
-            mu, sigma, means, covariances, next_means, next_covariances, A, C
+            return mu, sigma, means, covariances, next_means, next_covariances, A, C
 
     def smooth(self, a, params):
 
@@ -234,7 +234,10 @@ class Kalman_Filter(nn.Module):
         sequence_len = a.size(1)
 
         # get filtered mean and covariances for initialization of Kalman smoother
-        _, _, filtered_means, filtered_covariances, next_means, next_covariances, A, _, _ = params
+        if self.use_KVAE:
+            _, _, filtered_means, filtered_covariances, next_means, next_covariances, A, _, _ = params
+        else:
+             _, _, filtered_means, filtered_covariances, next_means, next_covariances, A, _ = params
 
         # collect smoothed means and covariance
         means = [filtered_means[-1]]
@@ -249,7 +252,7 @@ class Kalman_Filter(nn.Module):
 
             # get smoothed mean and covariance
             mu_t_T = filtered_means[t] + \
-                     torch.matmul(J, (means[0] - next_means[t+1]).unsqueeze(2)).squeeze(2)
+                     torch.matmul(J, (means[0] - next_means[t+1]).unsqueeze(-1)).squeeze(-1)
             sigma_t_T = filtered_covariances[t] + \
                      torch.matmul(torch.matmul(J, covariances[0] - next_covariances[t+1]), torch.transpose(J, 1, 2))
             
