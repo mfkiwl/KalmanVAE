@@ -79,17 +79,21 @@ class Kalman_Filter(nn.Module):
         self.device = device
         self.A_init = A_init
         
-        # initialize transition matrices
+        # initialize state transition matrix
         if isinstance(A_init, int) or isinstance(A_init, float):
             self.A = nn.Parameter((1-init_weight_A)*torch.randn(self.K, self.dim_z, self.dim_z)
                                    + init_weight_A*torch.eye(self.dim_z))
         else:
             self.A = A_init
+        
+        # initialize observation transition matrix
         if isinstance(C_init, int) or isinstance(C_init, float):
             self.C = nn.Parameter((1-init_weight_C)*torch.randn(self.K, self.dim_a, self.dim_z) 
                                    + init_weight_C*torch.eye(self.dim_a, self.dim_z))
         else:
             self.C = C_init
+        
+        # initialize matrix for additional input (if required)
         if self.dim_u > 0:
             if isinstance(B_init, int):
                 self.B = nn.Parameter((1-init_weight_A)*torch.randn(self.K, self.dim_z, self.dim_u)
@@ -105,20 +109,22 @@ class Kalman_Filter(nn.Module):
                                             K=self.K, 
                                             use_MLP=self.use_MLP)
         else:
-            self.A = self.A.detach()
-            self.C = self.C.detach()
+            self.A = self.A.detach().to(dtype).to(self.device)
+            self.C = self.C.detach().to(dtype).to(self.device)
             if self.dim_u > 0:
-                self.B = self.B.detach()
+                self.B = self.B.detach().to(dtype).to(self.device)
 
         # initialize noise variables
-        self.R = R_init*torch.eye(self.dim_a)
-        self.Q = Q_init*torch.eye(self.dim_z)
+        self.R = R_init*torch.eye(self.dim_a).to(dtype).to(self.device)
+        self.Q = Q_init*torch.eye(self.dim_z).to(dtype).to(self.device)
 
-        # initialize start state and start covariance
+        # initialize start state
         if isinstance(mu_init, int):
             self.mu = torch.zeros(self.dim_z).to(dtype).to(self.device)
         else:
             self.mu = mu_init
+
+        # initialize start covariance
         if isinstance(sigma_init, int):
             self.sigma = torch.eye(self.dim_z).to(dtype).to(self.device)
         else:
@@ -149,8 +155,8 @@ class Kalman_Filter(nn.Module):
             C = self.C.unsqueeze(0).unsqueeze(1).repeat(bs, sequence_len, 1, 1) # (bs, seq_len, dim_a, dim_z)
 
         # collect means and covariances for smoothing i.e mu_{t|t} --> E(z_t|y_1:t)
-        means = [] # [(bs, dim_z). ..., (bs, dim_z)]
-        covariances = [] # [(bs, dim_z, dim_z). ..., (bs, dim_z, dim_z)]
+        means = [] # [(bs, dim_z), ..., (bs, dim_z)]
+        covariances = [] # [(bs, dim_z, dim_z), ..., (bs, dim_z, dim_z)]
 
         # collect estimated means and covariances i.e mu_{t|t+1} --> E(z_t+1|y_1:t) 
         # i.e. multiply mean by transitional matrix A
@@ -160,10 +166,6 @@ class Kalman_Filter(nn.Module):
         # compute mixture of A and C in case we are use Kalman filter in KVAE
         if self.use_KVAE:
             A, C, alpha = self.compute_transition_matrices(a, train_dyn_net, imputation_idx)
-        
-        if self.device != -1:
-            self.R = self.R.to(self.device)
-            self.Q = self.Q.to(self.device)
         
         # initialize predicted mean and variance
         mu_pred = mu
