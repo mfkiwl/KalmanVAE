@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributions as Distributions
+#import torch.distributions as Distributions
+import torch.distributions as D
 
 def log_likelihood(x, mean, var, device):
     c = (- 0.5 * torch.log(torch.tensor([2 * torch.pi]))).to(device)
@@ -73,7 +74,7 @@ class Gaussian_Encoder(nn.Module):
         else:
             return x
     
-class Gaussian_Decoder(nn.Module):
+class Gaussian_Decoder_(nn.Module):
     def __init__(self, 
                  channels_in,
                  image_size,
@@ -146,7 +147,7 @@ class Gaussian_Decoder(nn.Module):
         else:
             return x
         
-class Bernoulli_Decoder(nn.Module):
+class Bernoulli_Decoder_(nn.Module):
     def __init__(self, 
                  channels_in,
                  image_size,
@@ -213,8 +214,107 @@ class Bernoulli_Decoder(nn.Module):
         else:
             return x
 
-        
+
+#########################################################################################################
 
 
+def compute_conv2d_output_size(input_size, kernel_size, stride, padding):
+    h, w = input_size
+    h_out = (h - kernel_size + 2 * padding) // stride + 1
+    w_out = (w - kernel_size + 2 * padding) // stride + 1
+
+    return h_out, w_out
 
 
+class Encoder(nn.Module):
+    def __init__(self, image_size, image_channels, a_dim):
+        super(Encoder, self).__init__()
+
+        self.conv1 = nn.Conv2d(
+            in_channels=image_channels,
+            out_channels=32,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+        )
+        self.conv2 = nn.Conv2d(
+            in_channels=32, out_channels=32, kernel_size=3, stride=2, padding=1
+        )
+        self.conv3 = nn.Conv2d(
+            in_channels=32, out_channels=32, kernel_size=3, stride=2, padding=1
+        )
+
+        conv_output_size = image_size
+        for _ in range(3):
+            conv_output_size = compute_conv2d_output_size(
+                conv_output_size, kernel_size=3, stride=2, padding=1
+            )
+
+        self.fc_mean = nn.Linear(
+            in_features=32 * conv_output_size[0] * conv_output_size[1],
+            out_features=a_dim,
+        )
+        self.fc_std = nn.Linear(
+            in_features=32 * conv_output_size[0] * conv_output_size[1],
+            out_features=a_dim,
+        )
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+
+        x_mean = self.fc_mean(x.view(x.shape[0], -1))
+        x_std = F.softplus(self.fc_std(x.view(x.shape[0], -1)))
+
+        return D.Normal(loc=x_mean, scale=x_std)
+
+
+class BernoulliDecoder(nn.Module):
+    def __init__(self, a_dim, image_size, image_channels):
+        super(BernoulliDecoder, self).__init__()
+
+        conv_output_size = image_size
+        for _ in range(3):
+            conv_output_size = compute_conv2d_output_size(
+                conv_output_size, kernel_size=3, stride=2, padding=1
+            )
+        self.conv_output_size = conv_output_size
+
+        self.fc = nn.Linear(
+            in_features=a_dim,
+            out_features=32 * conv_output_size[0] * conv_output_size[1],
+        )
+        self.deconv1 = nn.ConvTranspose2d(
+            in_channels=32,
+            out_channels=32,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            output_padding=1,
+        )
+        self.deconv2 = nn.ConvTranspose2d(
+            in_channels=32,
+            out_channels=32,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            output_padding=1,
+        )
+        self.deconv3 = nn.ConvTranspose2d(
+            in_channels=32,
+            out_channels=image_channels,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            output_padding=1,
+        )
+
+    def forward(self, x):
+        x = F.relu(self.fc(x))
+        x = x.view(-1, 32, *self.conv_output_size)
+        x = F.relu(self.deconv1(x))
+        x = F.relu(self.deconv2(x))
+        x = self.deconv3(x)
+
+        return D.Bernoulli(logits=x)

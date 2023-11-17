@@ -51,8 +51,8 @@ class Kalman_Filter(nn.Module):
                  A_init=1,
                  B_init=1,
                  C_init=1,
-                 R_init=0.001,
-                 Q_init=0.001,
+                 R_init=1.,
+                 Q_init=1.,
                  mu_init=0,
                  sigma_init=1,
                  K=3,
@@ -249,7 +249,7 @@ class Kalman_Filter(nn.Module):
             # get backwards Kalman Gain
             J = torch.matmul(filtered_covariances[t], torch.matmul(torch.transpose(A[:, t+1, :, :], 1,2), \
                              torch.inverse(next_covariances[t+1])))
-
+            
             # get smoothed mean and covariance
             mu_t_T = filtered_means[t] + \
                      torch.matmul(J, (means[0] - next_means[t+1]).unsqueeze(-1)).squeeze(-1)

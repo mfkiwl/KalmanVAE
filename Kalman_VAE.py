@@ -4,7 +4,9 @@ from torch.distributions import Normal
 from torch.distributions.multivariate_normal import MultivariateNormal
 
 from Kalman_Filter import Kalman_Filter
-from utils import Gaussian_Encoder, Gaussian_Decoder, Bernoulli_Decoder, log_likelihood
+# from utils import Gaussian_Encoder, Gaussian_Decoder, Bernoulli_Decoder, log_likelihood
+
+from utils import Encoder, BernoulliDecoder
 
 class KalmanVAE(nn.Module):
     
@@ -63,22 +65,34 @@ class KalmanVAE(nn.Module):
 
         # initialize encoder and decoder
         if self.train_VAE:
+            '''
             self.encoder = Gaussian_Encoder(channels_in=n_channels_in, 
                                             image_size=image_size, 
                                             latent_dim=self.dim_a, 
-                                            n_channels=[16, 32])
+                                            n_channels=[32, 32, 32])
             if use_bernoulli:
                 self.decoder = Bernoulli_Decoder(channels_in=n_channels_in, 
                                                 image_size=image_size, 
                                                 latent_dim=self.dim_a, 
-                                                n_channels=[16, 32])
+                                                n_channels=[32, 32, 32])
             else:
                 self.decoder = Gaussian_Decoder(channels_in=n_channels_in, 
                                             image_size=image_size, 
                                             latent_dim=self.dim_a,
                                             out_var=self.x_var, 
-                                            n_channels=[16, 32])
+                                            n_channels=[32, 32, 32])
+            '''
 
+            self.encoder = Encoder(image_size=[image_size, image_size], 
+                                   image_channels=1, 
+                                   a_dim=self.dim_a)
+            if use_bernoulli:
+                self.decoder = BernoulliDecoder(image_size=[image_size, image_size], 
+                                                image_channels=1,
+                                                a_dim=self.dim_a)
+
+
+                                            
     def calculate_loss(self, x, train_dyn_net=True, upscale_vae_loss=True, use_mean=False, recon_only=False):
         
         ######################
@@ -172,16 +186,16 @@ class KalmanVAE(nn.Module):
         #### LGSSM - part
         #### p_{gamma} (z|a)
         p_z_given_a = MultivariateNormal(loc=torch.stack(smoothed_means).permute(1,0,2), 
-                                         scale_tril=torch.linalg.cholesky(torch.stack(smoothed_covariances)).permute(1,0,2,3))
+                                         covariance_matrix=(torch.stack(smoothed_covariances)).permute(1,0,2,3))
         z_sample = p_z_given_a.rsample().view(batch_size, seq_len, -1)
 
         #### p_{gamma} (a|z)
         a_transition = torch.matmul(C, z_sample.unsqueeze(-1)).squeeze(-1)
-        # to_sample = a_sample - a_transition
-        p_a_given_z = MultivariateNormal(loc=a_transition, 
-                                         scale_tril=torch.linalg.cholesky(self.kalman_filter.R.repeat(batch_size, seq_len, 1, 1)))
+        p_a_given_z = MultivariateNormal(loc=a_transition.view(-1, self.dim_a), 
+                                         covariance_matrix=self.kalman_filter.R)
+
         if use_mean:
-            log_p_a_given_z = p_a_given_z.log_prob(a_sample).mean(1).mean()
+            log_p_a_given_z = p_a_given_z.log_prob(a_sample.view(-1, self.dim_a)).view(batch_size, seq_len).mean(1).mean()
         else:
             log_p_a_given_z = p_a_given_z.log_prob(a_sample).sum(1).mean()
 
@@ -203,7 +217,8 @@ class KalmanVAE(nn.Module):
         )
 
         p_zT_given_zt = MultivariateNormal(loc=z_transition_mean, 
-                                           scale_tril=torch.linalg.cholesky(z_transition_cov))
+                                           covariance_matrix=z_transition_cov)
+
         if use_mean:
             log_p_zT_given_zt = p_zT_given_zt.log_prob(z_sample).mean(1).mean()
         else:
