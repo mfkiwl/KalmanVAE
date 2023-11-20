@@ -141,7 +141,12 @@ class Kalman_Filter(nn.Module):
         '''
 
         # get batch size, sequence length
-        bs, sequence_len = a.size(0), a.size(1)        
+        bs = a.size(0)
+        sequence_len = a.size(1)  
+
+        # handle situation where we generate starting from 50 frames
+        if sequence_len > self.T:
+            sequence_len = self.T      
 
         # define mean and covariance for initial state z_0 = N(0, I)
         mu = self.mu.unsqueeze(0).repeat(bs, 1) # (bs, dim_z)
@@ -172,6 +177,7 @@ class Kalman_Filter(nn.Module):
         sigma_pred = sigma
 
         # iterate through the length of the sequence
+
         for t_step in range(sequence_len):
             
             # collect predicted mean and predicted covariance
@@ -186,7 +192,12 @@ class Kalman_Filter(nn.Module):
                     break
 
             # get residual
-            r = a[:, t_step, :] - a_pred
+            if a.size(1) > self.T:                    
+                r = a[:, t_step + (a.size(1) - self.T), :] - a_pred
+                if t_step ==  sequence_len -1:
+                    print(a[:, t_step + (a.size(1) - self.T), :])
+            else:
+                r = a[:, t_step, :] - a_pred
 
             # get Kalman gain
             S = torch.matmul(torch.matmul(C[:, t_step, :, :], sigma_pred), torch.transpose(C[:, t_step, :, :],1,2)) + self.R
@@ -287,8 +298,9 @@ class Kalman_Filter(nn.Module):
             to_concat = torch.zeros(batch_size, self.T-imputation_idx-1, self.K).to(self.device)
             alpha = torch.cat([alpha, to_concat], dim=1) 
 
+        
         # get mixture of As and Cs
-        A = torch.einsum('blk,kij->blij', alpha, self.A)
-        C = torch.einsum('blk,kij->blij', alpha, self.C)
+        A = torch.einsum('blk,kij->blij', alpha[:, a.size(1)-self.T:, :], self.A)
+        C = torch.einsum('blk,kij->blij', alpha[:, a.size(1)-self.T:, :], self.C)
 
         return A, C, alpha
