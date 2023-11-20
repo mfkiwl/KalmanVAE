@@ -341,13 +341,13 @@ def plot(test_dl,
                     generated_obs = generated_obs.squeeze(-1).cpu()
                     alpha = alpha.detach().cpu()
 
-                    print(alpha.size())
-
                     # get max and min values for visualization
                     max_obs_vals = generated_obs.max()
                     min_obs_vals = generated_obs.min()
 
                     # prepare frames for visualization
+                    batched_sample = batched_sample < 0.5
+                    batched_sample = batched_sample.float()
                     generated_seq = generated_seq < 0.5
                     generated_seq = generated_seq.float()
 
@@ -584,25 +584,42 @@ def main(args):
     print('Q_init: ', args.Q_noise_init)
     print('########################################')
 
-    # load data
-    train_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'train')
-    test_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'test')
-    train_dl = BouncingBallDataLoader(train_dir, images=True)
-    test_dl = BouncingBallDataLoader(test_dir, images=True)
-    train_loader = DataLoader(train_dl, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_dl, batch_size=args.batch_size, shuffle=True)
+    # load training data
+    if args.train:
+        train_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'train')
+        train_dl = BouncingBallDataLoader(train_dir, images=True)
+        train_loader = DataLoader(train_dl, batch_size=args.batch_size, shuffle=True)
+    
+    # get training dataset specs (useful for test dataset)
+    it = iter(train_loader)
+    first = next(it)
+    _, T, n_channels_in, dim, dim = first.size()
+    args.T = T
+
+    # load test data (possibly different between imputation and generation)
+    if args.test:
+        test_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'test')
+        test_dl = BouncingBallDataLoader(test_dir, images=True)
+        test_loader = DataLoader(test_dl, batch_size=args.batch_size, shuffle=True)
+
+        if args.test_generation or args.plot_generation:
+            if args.args.n_of_frame_to_generate > args.T:
+                tmp_dir_str = args.dataset + '_' + \
+                             str(args.n_of_frame_to_generate + args.n_of_starting_frames)
+                test_dir_gen = os.path.join(args.datasets_root_dir, '', 
+                                            tmp_dir_str, '', 
+                                            'test')
+                test_dl_gen = BouncingBallDataLoader(test_dir_gen, images=True)
+                test_loader_gen = DataLoader(test_dl_gen, batch_size=args.batch_size, shuffle=True)
+            else:
+                test_dl_gen = test_dl
+                test_loader_gen = test_loader
 
     # choose data format
     if args.use_double:
         dtype = torch.float64
     else:
         dtype = torch.float32
-
-    # get image size
-    it = iter(train_loader)
-    first = next(it)
-    _, T, n_channels_in, dim, dim = first.size()
-    args.T = T
 
     # load model
     kvae = KalmanVAE(n_channels_in,
@@ -817,6 +834,8 @@ def main(args):
         ############################
         ######## IMPUTATION ########
         ############################
+
+        # get imputation mask
         mask = [1] * T
         n_of_samples_to_mask = int((T - 8)*args.masking_fraction)
         if args.consecutive_masking:
@@ -865,22 +884,30 @@ def main(args):
         ############################
         ######## GENERATION ########
         ############################
+
+        # get generation mask
         mask = [1] * (args.n_of_starting_frames + args.n_of_frame_to_generate)
         to_zero = np.arange(args.n_of_starting_frames, args.n_of_starting_frames + args.n_of_frame_to_generate)
         for mask_idx in range(len(mask)):
             if mask_idx in to_zero:
                 mask[mask_idx] = 0
+        
+        # get folder name based on frames to generate
+        dir_gen_name = 'gen_{}'.format(args.n_of_frame_to_generate)
 
+        # test generation: 
+        # - MSE (gen-gt) (TODO)
+        # - Consecutive-Distance(gen-gt) (TODO)
         if args.test_generation:
             if args.n_of_starting_frames == args.T:
-                output_folder = os.path.join(save_filename, '', 'generations', '', 'long_term')
+                output_folder = os.path.join(save_filename, '', 'generations', '', dir_gen_name, '', 'long_term')
             else:
-                output_folder = os.path.join(save_filename, '', 'generations', '', 'gt_comparison')
+                output_folder = os.path.join(save_filename, '', 'generations', '', dir_gen_name, '', 'gt_comparison')
             if not os.path.exists('{}'.format(output_folder)):
                 os.makedirs(output_folder)
                 
             print('Testing Generation ...')
-            test_generation(test_loader=test_loader, 
+            test_generation(test_loader=test_loader_gen, 
                             mask=mask, 
                             kvae=kvae, 
                             output_folder=output_folder, 
@@ -888,12 +915,15 @@ def main(args):
                             dtype=dtype, 
                             full_alpha=args.full_alpha)
         
+        # plot generation:
+        # - single plots (gen-gt | weights | a-trajectories) (TODO)
+        # - batched plots (gen-gt) (TODO)
         if args.plot_generation:
-            output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'generations')
+            output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', dir_gen_name, '', 'generations')
             if not os.path.isdir(output_folder):
                 os.makedirs(output_folder)
             print('Plotting Generation ...')
-            plot(test_dl=test_dl, 
+            plot(test_dl=test_dl_gen, 
                  kvae=kvae, 
                  mask=mask, 
                  output_folder=output_folder, 

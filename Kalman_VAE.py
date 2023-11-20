@@ -308,6 +308,8 @@ class KalmanVAE(nn.Module):
         # get dims
         batch_size = x.size(0)
         seq_len = x.size(1)
+        if x.size(1) > self.T:
+            seq_len = self.T
 
         # get masked input
         if len(mask) <= self.T:
@@ -315,7 +317,7 @@ class KalmanVAE(nn.Module):
             x_masked = mask_t*x
             x_masked = x_masked.to(x.dtype)
         else:
-            x_masked = x
+            x_masked = x[:, :self.T, :]
 
         # feed masked sample in encoder
         a_dist = self.encoder(x_masked.view(-1, *x.shape[2:]))
