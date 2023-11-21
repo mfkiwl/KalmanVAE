@@ -133,7 +133,8 @@ class Kalman_Filter(nn.Module):
     def filter(self, 
                a, 
                train_dyn_net=None, 
-               imputation_idx=None):
+               imputation_idx=None, 
+               gt_a=None):
 
         '''
         This method carries out Kalman filtering based 
@@ -170,7 +171,11 @@ class Kalman_Filter(nn.Module):
 
         # compute mixture of A and C in case we are use Kalman filter in KVAE
         if self.use_KVAE:
-            A, C, alpha = self.compute_transition_matrices(a, train_dyn_net, imputation_idx)
+            if gt_a is not None:
+                A, C, alpha = self.compute_transition_matrices(gt_a, train_dyn_net, imputation_idx)
+            else:
+                A, C, alpha = self.compute_transition_matrices(a, train_dyn_net, imputation_idx)
+        
         
         # initialize predicted mean and variance
         mu_pred = mu
@@ -194,8 +199,10 @@ class Kalman_Filter(nn.Module):
             # get residual
             if a.size(1) > self.T:                    
                 r = a[:, t_step + (a.size(1) - self.T), :] - a_pred
+                '''
                 if t_step ==  sequence_len -1:
                     print(a[:, t_step + (a.size(1) - self.T), :])
+                '''
             else:
                 r = a[:, t_step, :] - a_pred
 
@@ -297,7 +304,6 @@ class Kalman_Filter(nn.Module):
         if imputation_idx is not None:
             to_concat = torch.zeros(batch_size, self.T-imputation_idx-1, self.K).to(self.device)
             alpha = torch.cat([alpha, to_concat], dim=1) 
-
         
         # get mixture of As and Cs
         A = torch.einsum('blk,kij->blij', alpha[:, a.size(1)-self.T:, :], self.A)

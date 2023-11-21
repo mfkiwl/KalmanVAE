@@ -303,13 +303,23 @@ class KalmanVAE(nn.Module):
 
         return imputed_smoothed_data, imputed_filtered_data, alpha.detach(), filtered_obs.detach(), smoothed_obs.detach(), gt_sample
 
-    def generate(self, x, mask, sample=False, full_alpha=False):  
+    def generate(self, x, mask, sample=False, full_alpha=False, use_gt_weights=False):  
 
         # get dims
         batch_size = x.size(0)
         seq_len = x.size(1)
         if x.size(1) > self.T:
             seq_len = self.T
+
+        # get ground-truth observations
+        gt_obs = self.encoder(x.view(-1, *x.shape[2:])).mean.view(batch_size, x.size(1), self.dim_a).detach()
+
+        # analysis purpose
+        if use_gt_weights:
+            print('Using Ground Truth Weights')
+            gt_a = gt_obs
+        else:
+            gt_a = None
 
         # get masked input
         if len(mask) <= self.T:
@@ -320,7 +330,7 @@ class KalmanVAE(nn.Module):
             x_masked = x[:, :self.T, :]
 
         # feed masked sample in encoder
-        a_dist = self.encoder(x_masked.view(-1, *x.shape[2:]))
+        a_dist = self.encoder(x_masked.reshape(-1, *x_masked.shape[2:]))
 
         # sample from q_{phi} (a|x)
         if sample:
@@ -355,8 +365,11 @@ class KalmanVAE(nn.Module):
                     imputation_idx = t
                 
                 # get filtered distribution up to t=t-1
-                _, _, _, _, next_means, _, _, C, alpha = self.kalman_filter.filter(a_sample[:, start_idx:end_idx, :], imputation_idx=imputation_idx)
-                a_sample[:, t, :] = torch.matmul(C[:, C_idx, :, :], torch.stack(next_means).permute(1,0,2)[:, C_idx, :].unsqueeze(-1)).squeeze(-1)
+                _, _, _, _, next_means, _, _, C, alpha = self.kalman_filter.filter(a_sample[:, start_idx:end_idx, :], 
+                                                                                   imputation_idx=imputation_idx, 
+                                                                                   gt_a=gt_a[:, start_idx:end_idx, :])
+                a_sample[:, t, :] = torch.matmul(C[:, C_idx, :, :], \
+                                                  torch.stack(next_means).permute(1,0,2)[:, C_idx, :].unsqueeze(-1)).squeeze(-1)
 
         # decode predicted observations
         if self.use_bernoulli:
@@ -365,6 +378,6 @@ class KalmanVAE(nn.Module):
         else:
             generated_data, _ = self.decoder(a_sample.view(batch_size*len(mask), -1))
 
-        return generated_data, a_sample.detach(), alpha.detach()
+        return generated_data, a_sample.detach(), gt_obs, alpha.detach()
     
     

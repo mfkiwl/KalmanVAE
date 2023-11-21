@@ -230,12 +230,20 @@ def test_generation(test_loader, mask, kvae, output_folder, args, dtype, full_al
 
         else:
             distances = []
+            gen_recon_error = 0.
             for i, sample in enumerate(test_loader, 1):
                 
                 # get generated sequence
                 sample = sample > 0.5
                 sample = sample.to(dtype).to('cuda:' + str(args.device))
-                generated_seq, generated_obs, _ = kvae.generate(sample, mask, full_alpha=full_alpha)
+                generated_seq, generated_obs, _, _ = kvae.generate(sample, 
+                                                                   mask, 
+                                                                   full_alpha=full_alpha, 
+                                                                   use_gt_weights=args.use_gt_weights)
+                
+                mse = nn.MSELoss(reduction='none')
+                recon_error = mse_error(sample.cpu(), generated_seq.cpu()).sum(0, 2, 3, 4, 5).div(sample.size(0)*sample.size(2)*sample.size(3)*sample.size(4))
+                gen_recon_error += recon_error
 
                 # compute distance between consecutive datapoints in observation space
                 a = generated_obs[:, 1:, :]
@@ -245,16 +253,28 @@ def test_generation(test_loader, mask, kvae, output_folder, args, dtype, full_al
                 distance = torch.sqrt(torch.square(a-b).sum(dim=-1))
                 distances.append(distance)
 
+            gen_recon_error = gen_recon_error/len(test_loader)
             distances_to_plot = torch.cat(distances, dim=0).cpu()
+
+            if args.use_gt_weights:
+                output_folder = os.path.join(output_folder, '', 'gt_weights')
+                if not os.path.isdir:
+                    os.makedirs(output_folder)
 
             fig = plt.figure()
             plt.errorbar(np.arange(len(mask)-1), distances_to_plot.mean(0).cpu(), yerr=distances_to_plot.var(0).cpu(), color="r")
             plt.plot(np.arange(len(mask)-1), distances_to_plot.mean(0).cpu())
             plt.xlabel('Time')
-            plt.ylabel('COnsecutive Distance')
+            plt.ylabel('Consecutive Distance')
             plt.title('Consecutive Points Distance - Generation')
-    
             fig.savefig(os.path.join(output_folder, 'distance.png'))
+
+            fig = plt.figure()
+            plt.plot(np.arange(len(mask)), gen_recon_error.cpu())
+            plt.xlabel('Time')
+            plt.ylabel('Reconstruction MSE')
+            plt.title('Generation Reconstruction Error')
+            fig.savefig(os.path.join(output_folder, 'generation_mse.png'))
 
 def plot(test_dl, 
          kvae, 
@@ -274,7 +294,10 @@ def plot(test_dl,
         # show individual sequences, trajectories, and weights 
         
         # get root dir
-        root_dir = os.path.join(output_folder, 'trajectories', '')
+        if args.use_gt_weights:
+            root_dir = os.path.join(output_folder, 'trajectories_gt_weights', '')
+        else:
+            root_dir = os.path.join(output_folder, 'trajectories', '')
         if not os.path.isdir:
             os.mkdir(root_dir)
         
@@ -336,14 +359,22 @@ def plot(test_dl,
 
                 else:
                     # get generations
-                    generated_seq, generated_obs, alpha = kvae.generate(batched_sample, mask, full_alpha=full_alpha)
+                    generated_seq, generated_obs, gt_obs, alpha = kvae.generate(batched_sample, 
+                                                                                mask, 
+                                                                                full_alpha=full_alpha, 
+                                                                                use_gt_weights=args.use_gt_weights)
                     generated_seq = generated_seq.cpu()
                     generated_obs = generated_obs.squeeze(-1).cpu()
+                    gt_obs = gt_obs.cpu()
                     alpha = alpha.detach().cpu()
 
                     # get max and min values for visualization
-                    max_obs_vals = generated_obs.max()
-                    min_obs_vals = generated_obs.min()
+                    gt_max = gt_obs.max()
+                    gt_min = gt_obs.min()
+                    gen_max = generated_obs.max()
+                    gen_min = generated_obs.min()
+                    max_obs_vals = max([gt_max, gen_max])
+                    min_obs_vals = min([gt_min, gen_min])
 
                     # prepare frames for visualization
                     batched_sample = batched_sample < 0.5
@@ -380,12 +411,13 @@ def plot(test_dl,
                             fig.suptitle(f"$t = {t}$ (Ground Truth)")
                         else:
                             fig.suptitle(f"$t = {t}$ (Generation)", color='red')
+                    
+                    bg_ch = batched_sample[0, t, 0].cpu().unsqueeze(-1).repeat(1, 1, 2)
+                    r_ch = torch.ones(batched_sample[0, t, 0].size(0), batched_sample[0, t, 0].size(0), 1)
+                    gt_to_show = torch.cat([r_ch, bg_ch], dim=2)
 
                     # create frames for SMOOTHING + FILTERING
                     if which == 'imputation':
-                        bg_ch = batched_sample[0, t, 0].cpu().unsqueeze(-1).repeat(1, 1, 2)
-                        r_ch = torch.ones(batched_sample[0, t, 0].size(0), batched_sample[0, t, 0].size(0), 1)
-                        gt_to_show = torch.cat([r_ch, bg_ch], dim=2)
                         im_s_to_show = imputed_seq[0, t, 0].unsqueeze(-1).repeat(1, 1, 3).float().detach().cpu().numpy()
                         im_f_to_show = imputed_filtered_seq[0, t, 0].unsqueeze(-1).repeat(1, 1, 3).float().detach().cpu().numpy()
 
@@ -416,14 +448,10 @@ def plot(test_dl,
                         axes[3].grid()
                     
                     else:
-                        if t < args.T:
-                            gen_to_show = generated_seq[0, t, 0].unsqueeze(-1).repeat(1, 1, 3)
-                        else:
-                            bg_ch = generated_seq[0, t, 0].cpu().unsqueeze(-1).repeat(1, 1, 2)
-                            r_ch = torch.ones(generated_seq[0, t, 0].size(0), generated_seq[0, t, 0].size(0), 1)
-                            gen_to_show = torch.cat([r_ch, bg_ch], dim=2)
+                        gen_to_show = generated_seq[0, t, 0].unsqueeze(-1).repeat(1, 1, 3).float().detach().cpu().numpy()
 
-                        axes[0].imshow(gen_to_show, vmin=0, vmax=1)
+                        axes[0].imshow(gt_to_show, vmin=0, vmax=1)
+                        axes[0].imshow(gen_to_show, vmin=0, vmax=1, alpha=0.5)
                         axes[0].set_adjustable('box') 
                         axes[0].set_title(r"generated $\mathbf{x}_t$")
 
@@ -434,17 +462,12 @@ def plot(test_dl,
                         pos_bar = axes[1].get_position()
                         axes[1].set_position([pos_bar.x0, pos_img.y0, pos_bar.width, pos_img.height])
 
-                        if t >= args.T:
-                            if t == args.T:
-                                print(generated_obs[0, args.T:t+1, 0].size())
-                            color = 'red'
-                            axes[2].plot(generated_obs[0, 0:args.T, 0], generated_obs[0, 0:args.T, 1], color='black')
-                            axes[2].plot(generated_obs[0, args.T - 1:t+1, 0], generated_obs[0, args.T - 1:t+1, 1], color=color)
-                        else:
-                            color = 'black'
-                            axes[2].plot(generated_obs[0, 0:t+1, 0], generated_obs[0, 0:t+1, 1], color=color)
+                        axes[2].set_title('Observation space')
+                        axes[2].plot(gt_obs[0, 0:t+1, 0], gt_obs[0, 0:t+1, 1], color='red', label='Ground-Truth')
+                        axes[2].plot(generated_obs[0, 0:t+1, 0], generated_obs[0, 0:t+1, 1], color='black', label='Generated')
                         axes[2].set_xlim([min_obs_vals, max_obs_vals])
                         axes[2].set_ylim([min_obs_vals, max_obs_vals])
+                        axes[2].legend()
                         axes[2].grid()
                     
                     plt.tight_layout()
@@ -585,10 +608,9 @@ def main(args):
     print('########################################')
 
     # load training data
-    if args.train:
-        train_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'train')
-        train_dl = BouncingBallDataLoader(train_dir, images=True)
-        train_loader = DataLoader(train_dl, batch_size=args.batch_size, shuffle=True)
+    train_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'train')
+    train_dl = BouncingBallDataLoader(train_dir, images=True)
+    train_loader = DataLoader(train_dl, batch_size=args.batch_size, shuffle=True)
     
     # get training dataset specs (useful for test dataset)
     it = iter(train_loader)
@@ -597,23 +619,29 @@ def main(args):
     args.T = T
 
     # load test data (possibly different between imputation and generation)
-    if args.test:
-        test_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'test')
-        test_dl = BouncingBallDataLoader(test_dir, images=True)
-        test_loader = DataLoader(test_dl, batch_size=args.batch_size, shuffle=True)
+    test_dir = os.path.join(args.datasets_root_dir, '', args.dataset, '', 'test')
+    test_dl = BouncingBallDataLoader(test_dir, images=True)
+    test_loader = DataLoader(test_dl, batch_size=args.batch_size, shuffle=True)
 
+    if args.test:
         if args.test_generation or args.plot_generation:
-            if args.args.n_of_frame_to_generate > args.T:
+            if args.n_of_frame_to_generate > args.T:
                 tmp_dir_str = args.dataset + '_' + \
-                             str(args.n_of_frame_to_generate + args.n_of_starting_frames)
-                test_dir_gen = os.path.join(args.datasets_root_dir, '', 
+                                str(args.n_of_frame_to_generate + args.n_of_starting_frames)
+                test_dir = os.path.join(args.datasets_root_dir, '', 
                                             tmp_dir_str, '', 
                                             'test')
-                test_dl_gen = BouncingBallDataLoader(test_dir_gen, images=True)
+                test_dl_gen = BouncingBallDataLoader(test_dir, images=True)
                 test_loader_gen = DataLoader(test_dl_gen, batch_size=args.batch_size, shuffle=True)
             else:
                 test_dl_gen = test_dl
                 test_loader_gen = test_loader
+
+    print('\n')
+    print('########################################')
+    print('Number of Frames to generate: ', args.n_of_frame_to_generate)
+    print('Test Dataset Directory: ', test_dir)
+    print('########################################')
 
     # choose data format
     if args.use_double:
@@ -913,13 +941,14 @@ def main(args):
                             output_folder=output_folder, 
                             args=args, 
                             dtype=dtype, 
-                            full_alpha=args.full_alpha)
+                            full_alpha=args.full_alpha, 
+                            use_gt_weight=args.use_gt_weights)
         
         # plot generation:
         # - single plots (gen-gt | weights | a-trajectories) (TODO)
         # - batched plots (gen-gt) (TODO)
         if args.plot_generation:
-            output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', dir_gen_name, '', 'generations')
+            output_folder = os.path.join(save_filename, '', 'dyn_analysis', '', 'generations', '', dir_gen_name)
             if not os.path.isdir(output_folder):
                 os.makedirs(output_folder)
             print('Plotting Generation ...')
@@ -1036,6 +1065,8 @@ if __name__ == '__main__':
         help='number of sample we want to generate')
     parser.add_argument('--full_alpha', type=int,  default=1, 
         help='decide whether to compute alpha weights from whole sequence or last 50 frames')
+    parser.add_argument('--use_gt_weights', type=int, default=0, 
+        help='For generation decide whether to use g weights instead of those reulting from estimated observations (analysis purposes)')
 
     # logistics
     parser.add_argument('--datasets_root_dir', type=str, default="/data2/users/lr4617/data/",
